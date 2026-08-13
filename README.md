@@ -1,0 +1,104 @@
+# DeltaDB-lite for DeepSeek Harness
+
+A single-user "software is made between commits" plugin set for the DeepSeek
+Harness **web** profile — the DeltaDB effect (operation log between commits,
+code ↔ conversation tracing, rewind to any point, agent-queryable history)
+without real multiplayer.
+
+## Packages
+
+| package | role |
+|---|---|
+| [`deltadb-server`](deltadb-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/deltadb/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), registers the agent-facing `deltadb` tool, and serves `/deltadb/...` HTTP routes (digest, op detail, non-destructive rewind). |
+| [`deltadb-client`](deltadb-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, and one-click rewind. Zero-build classic-script bundle. |
+
+## How it works
+
+- **Capture** runs at turn boundaries (`turn/start` records manual edits,
+  `turn/end` records the agent's edits for that turn), content-hash based for
+  correctness on coarse-granularity filesystems. Ignored: `.git`,
+  `node_modules`, `.deltadb`, `target`, `dist`, `build`, `venv`, …; files
+  > 20 MB excluded.
+- **Stable identity** = `(sessionId, opId)`; ops reference the session event
+  seq that bracketed them (`atSeq`), so the op log and the conversation log
+  stay addressable together.
+- **Rewind** is non-destructive: it materializes the workspace state right
+  after an op into `<cwd>/.deltadb/rewinds/<opId>-<ts>/` (delta snapshot: files
+  never touched by captured history are not copied).
+- **Realtime worktree review**: the panel's Worktree tab lists the workspace
+  files (`/deltadb/<sessionId>/tree.json`), reads any file
+  (`…/file.json?path=…`, symlink- and traversal-guarded), highlights the lines
+  the latest op changed (anchored by per-op `newRanges` recorded at capture),
+  and shows the file's full op history with prompt previews — refreshed on
+  every conversation-window change while the agent works. Code is
+  **syntax-highlighted** by language (extension-detected, compact built-in
+  tokenizer with cross-line block comments; diffs highlight the code too). The
+  ⛶ button expands the review into a wide overlay (`shell.overlay`) with a
+  side-by-side tree + viewer.
+- **Anchored notes** ("notation on selected text"): select code in the viewer
+  and press save on the floating note composer — the note is stored
+  (`POST /deltadb/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
+  range and snippet, marked in the gutter, listed under the file, and
+  click-to-jump back to the line.
+- **The agent can query its own history** via the `deltadb` tool
+  (`status | list | where <path> | why <opId|turn> | rewind <opId>`).
+
+## Install
+
+Already done for this machine's web profile; to reproduce elsewhere:
+
+```sh
+# from the repo root
+dsh plugin --profile web add file:$PWD/deltadb-server file:$PWD/deltadb-client
+```
+
+Then add to `$DSH_HOME/profiles/web/cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: deltadb-server
+      name: deltadb-server
+    - id: deltadb-client
+      name: deltadb-client
+```
+
+> pnpm `file:` deps are **copied**, not linked: after editing the source,
+> re-sync the copies (`dsh plugin --profile web add file:... --force` or `cp`
+> the changed files into `$DSH_HOME/profiles/web/node_modules/<pkg>/`).
+
+## Activate (requires restart)
+
+The running web GUI predates the plugin — restart it:
+
+1. Stop the current `dsh web` process (the one serving this page).
+2. Start it again the same way (e.g. `npm exec @deepseek-ai/dsh web`).
+3. Hard-refresh the browser tab (the client bundle is composed into the page's
+   boot graph at load time).
+
+Then: open any session with a conversation and the **DeltaDB** panel appears in
+the right-hand column (it auto-opens the details column; close it like any
+panel). `curl http://127.0.0.1:3080/deltadb/status.json` confirms the server
+half.
+
+## What to expect / known tradeoffs
+
+- Capture starts fresh per session: the first turn of a session establishes the
+  baseline, so edits from *before* the plugin was active (including this
+  session) are not in the log.
+- The panel occupies the `details` column at `priority: -1`, shadowing
+  ui-conversation's built-in tool-inspector panel (single slot, lowest priority
+  wins). Restore coexistence by moving the DeltaDB panel to a different
+  surface.
+- The headless profile on this machine also carries `deltadb-server` (a
+  smoke-test bed): `dsh --profile headless "use the deltadb tool to list what changed"`.
+  Remove the two lines from `profiles/headless/cordis.patch.yml` to disable.
+- Multi-machine replication, virtualized worktrees, and shared threads are
+  deliberately out of scope (single user + agent collaboration).
+
+## Tests
+
+```sh
+cd deltadb-server && node --test 'test/*.test.mjs'   # capture engine + routes
+# client bundle: loads under the module-loader contract and renders (see the
+# verification script used during development)
+```

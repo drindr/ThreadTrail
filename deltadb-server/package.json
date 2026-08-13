@@ -1,0 +1,23 @@
+{
+  "name": "deltadb-server",
+  "version": "0.1.0",
+  "description": "DeltaDB-lite capture engine for DeepSeek Harness: records every file edit between turns with stable identity, links edits to the conversation, and serves digests, diffs, and rewind materialization.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./capture": "./capture.js"
+  },
+  "files": [
+    "index.js",
+    "capture.js",
+    "tool.js",
+    "routes.js",
+    "messages.js"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
