@@ -7,7 +7,7 @@ import { CaptureStore } from '../capture.js';
 import { registerRoutes } from '../routes.js';
 
 async function tempDir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'deltadb-routes-'));
+  return fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-routes-'));
 }
 
 function mockRes() {
@@ -64,16 +64,16 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   registerRoutes(webServer, { store, sessions });
   assert.equal(routes.length, 1);
   assert.equal(routes[0].kind, 'prefix');
-  assert.equal(routes[0].path, '/deltadb');
+  assert.equal(routes[0].path, '/threadtrail');
   // Fidelity to the webserver's matcher: a prefix route matches only when
   // pathname.startsWith(prefix + "/") (or equals it) — a trailing slash on the
   // prefix would demand a double slash and never match.
   {
     const { path } = routes[0];
-    for (const probe of ['/deltadb/status.json', '/deltadb/sess-abc/digest.json', '/deltadb']) {
+    for (const probe of ['/threadtrail/status.json', '/threadtrail/sess-abc/digest.json', '/threadtrail']) {
       assert.ok(probe === path || probe.startsWith(`${path}/`), `matcher should accept ${probe}`);
     }
-    assert.ok(!'/deltadbX/status.json'.startsWith(`${path}/`), 'sibling paths must not match');
+    assert.ok(!'/threadtrailX/status.json'.startsWith(`${path}/`), 'sibling paths must not match');
   }
 
   const handler = routes[0].handler;
@@ -81,7 +81,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // digest
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/digest.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/digest.json' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.ops.length, 1);
@@ -92,7 +92,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // op detail with full diff
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/op/op-1.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/op/op-1.json' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.files[0].added, 1);
@@ -103,7 +103,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // rewind
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/rewind/op-1.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/rewind/op-1.json' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     const content = await fs.readFile(path.join(body.target, 'a.txt'), 'utf8');
@@ -113,7 +113,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // status
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/status.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/status.json' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.enabled, true);
@@ -123,24 +123,24 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // errors: unknown op, invalid session id, wrong method
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/op/op-99.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/op/op-99.json' }, res);
     assert.equal(res.status, 404);
   }
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/bad.id/digest.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/bad.id/digest.json' }, res);
     assert.equal(res.status, 400);
   }
   {
     const res = mockRes();
-    await handler({ method: 'POST', url: '/deltadb/sess-abc/digest.json' }, res);
+    await handler({ method: 'POST', url: '/threadtrail/sess-abc/digest.json' }, res);
     assert.equal(res.status, 405);
   }
 
   // worktree browser: tree listing
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/tree.json' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/tree.json' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     assert.deepEqual(body.files.map((f) => f.path).sort(), ['a.txt', 'b.txt']);
@@ -149,7 +149,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // worktree browser: file content + per-file op history with ranges
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/file.json?path=a.txt' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=a.txt' }, res);
     assert.equal(res.status, 200);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.content, 'one\ntwo\n');
@@ -163,12 +163,12 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   // traversal guard: escaping paths are refused
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: `/deltadb/sess-abc/file.json?path=${encodeURIComponent('../secret.txt')}` }, res);
+    await handler({ method: 'GET', url: `/threadtrail/sess-abc/file.json?path=${encodeURIComponent('../secret.txt')}` }, res);
     assert.equal(res.status, 400);
   }
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/file.json?path=missing.txt' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=missing.txt' }, res);
     assert.equal(res.status, 404);
   }
 
@@ -178,7 +178,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
     await handler(
       {
         method: 'POST',
-        url: '/deltadb/sess-abc/notes',
+        url: '/threadtrail/sess-abc/notes',
         [Symbol.asyncIterator]: async function* () {
           yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 2, endLine: 2, snippet: 'two', note: 'check this' }));
         },
@@ -192,14 +192,14 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   }
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/file.json?path=a.txt' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=a.txt' }, res);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.notes.length, 1);
     assert.equal(body.notes[0].note, 'check this');
   }
   {
     const res = mockRes();
-    await handler({ method: 'GET', url: '/deltadb/sess-abc/file.json?path=b.txt' }, res);
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=b.txt' }, res);
     const body = JSON.parse(res.chunks.join(''));
     assert.equal(body.notes.length, 0);
   }
@@ -209,7 +209,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
     await handler(
       {
         method: 'POST',
-        url: '/deltadb/sess-abc/notes',
+        url: '/threadtrail/sess-abc/notes',
         [Symbol.asyncIterator]: async function* () {
           yield Buffer.from(JSON.stringify({ path: '../x', startLine: 1, endLine: 1, note: 'x' }));
         },
@@ -223,7 +223,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
     await handler(
       {
         method: 'POST',
-        url: '/deltadb/sess-abc/notes',
+        url: '/threadtrail/sess-abc/notes',
         [Symbol.asyncIterator]: async function* () {
           yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 5, endLine: 2, note: 'x' }));
         },
@@ -237,7 +237,7 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
     await handler(
       {
         method: 'POST',
-        url: '/deltadb/sess-abc/notes',
+        url: '/threadtrail/sess-abc/notes',
         [Symbol.asyncIterator]: async function* () {
           yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 1, endLine: 1, note: '   ' }));
         },
@@ -248,12 +248,12 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
   }
   {
     const res = mockRes();
-    await handler({ method: 'DELETE', url: '/deltadb/sess-abc/notes/n-1' }, res);
+    await handler({ method: 'DELETE', url: '/threadtrail/sess-abc/notes/n-1' }, res);
     assert.equal(res.status, 200);
   }
   {
     const res = mockRes();
-    await handler({ method: 'DELETE', url: '/deltadb/sess-abc/notes/n-1' }, res);
+    await handler({ method: 'DELETE', url: '/threadtrail/sess-abc/notes/n-1' }, res);
     assert.equal(res.status, 404);
   }
 

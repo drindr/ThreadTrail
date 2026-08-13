@@ -6,7 +6,7 @@ import path from 'node:path';
 import { CaptureStore, computeDiff, computeRanges, sha256 } from '../capture.js';
 
 async function tempDir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'deltadb-test-'));
+  return fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-test-'));
 }
 
 async function write(rel, content) {

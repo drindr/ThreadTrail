@@ -1,24 +1,24 @@
 /**
- * DeltaDB-lite — server half.
+ * ThreadTrail — server half.
  *
  * Captures every file edit of a session's workspace between turns (the
  * "software is made between commits" granularity), links each change to the
  * conversation that produced it, and exposes:
- *   - the `deltadb` query tool to the agent,
- *   - `/deltadb/...` HTTP routes (digest / op detail / non-destructive rewind)
+ *   - the `threadtrail` query tool to the agent,
+ *   - `/threadtrail/...` HTTP routes (digest / op detail / non-destructive rewind)
  *     to the browser panel (registered only when `ctx.webServer` exists, so
  *     the plugin also composes on the headless profile).
  */
 
 import { CaptureStore } from './capture.js';
-import { deltadbTool } from './tool.js';
+import { threadtrailTool } from './tool.js';
 import { registerRoutes } from './routes.js';
 
 export const inject = ['sessions', 'tools'];
 
 export function apply(ctx) {
   // Canonical harness home (DSH_HOME, or ~/.dsh) — DSH_HOME is not exported
-  // into the web app process, so a bare env fallback would land in ~/deltadb.
+  // into the web app process, so a bare env fallback would land in ~/threadtrail.
   const store = new CaptureStore();
 
   const ready = store.init().then(() => {
@@ -33,12 +33,12 @@ export function apply(ctx) {
     // ── capture at turn boundaries ───────────────────────────────────────
     ctx.on('session/event', (session, event) => {
       handleEvent(store, session, event).catch((err) => {
-        ctx.logger?.warn?.(`deltadb capture error: ${err?.stack ?? err}`);
+        ctx.logger?.warn?.(`threadtrail capture error: ${err?.stack ?? err}`);
       });
     });
 
     // ── agent query tool ─────────────────────────────────────────────────
-    ctx.tools.register(deltadbTool({ store, sessions: ctx.sessions }));
+    ctx.tools.register(threadtrailTool({ store, sessions: ctx.sessions }));
 
     // ── browser routes (web profile only) ────────────────────────────────
     const webServer = ctx.get('webServer');

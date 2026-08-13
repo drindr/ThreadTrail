@@ -1,7 +1,7 @@
 {
-  "name": "deltadb-client",
+  "name": "threadtrail-client",
   "version": "0.1.0",
-  "description": "DeltaDB-lite browser panel for DeepSeek Harness: the operation timeline between commits, message -> diff, code -> conversation, and non-destructive rewind.",
+  "description": "ThreadTrail browser panel for DeepSeek Harness: the operation timeline between commits, message -> diff, code -> conversation, and non-destructive rewind.",
   "type": "module",
   "main": "index.js",
   "exports": {

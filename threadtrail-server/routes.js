@@ -1,8 +1,8 @@
 /**
- * HTTP routes for the DeltaDB-lite panel. Mounted on the web server under the
- * `/deltadb/` prefix (the web-server exact/prefix table matches before the SPA
+ * HTTP routes for the ThreadTrail panel. Mounted on the web server under the
+ * `/threadtrail/` prefix (the web-server exact/prefix table matches before the SPA
  * fallback). GETs for reads; POST/DELETE only for the anchored-notes API.
- * Rewind is non-destructive (materializes into `<cwd>/.deltadb/rewinds/…`).
+ * Rewind is non-destructive (materializes into `<cwd>/.threadtrail/rewinds/…`).
  */
 
 import path from 'node:path';
@@ -39,7 +39,7 @@ async function readBody(req) {
     size += chunk.length;
     if (size > MAX_BODY_BYTES) {
       const e = new Error('request body too large');
-      e.code = 'DELTADB_BODY_TOO_LARGE';
+      e.code = 'THREADTRAIL_BODY_TOO_LARGE';
       throw e;
     }
     chunks.push(chunk);
@@ -50,10 +50,10 @@ async function readBody(req) {
 }
 
 /**
- * Register the /deltadb/ routes on the web server.
+ * Register the /threadtrail/ routes on the web server.
  *
  * NOTE: the prefix must NOT end with a slash — the webserver matcher tests
- * `pathname.startsWith(prefix + "/")`, so "/deltadb/" would demand a double
+ * `pathname.startsWith(prefix + "/")`, so "/threadtrail/" would demand a double
  * slash and never match.
  * @param {import('@deepseek-ai/dsh-host-webserver').WebServer} webServer
  * @param {{ store: import('./capture.js').CaptureStore, sessions: import('@deepseek-ai/dsh-session').SessionStore }} deps
@@ -61,7 +61,7 @@ async function readBody(req) {
 export function registerRoutes(webServer, { store, sessions }) {
   webServer.register({
     kind: 'prefix',
-    path: '/deltadb',
+    path: '/threadtrail',
     handler: async (req, res) => {
       try {
         await handle(req, res, { store, sessions });
@@ -74,7 +74,7 @@ export function registerRoutes(webServer, { store, sessions }) {
 
 async function handle(req, res, { store, sessions }) {
   const url = new URL(req.url, 'http://localhost');
-  const parts = url.pathname.split('/').filter(Boolean); // ['deltadb', ...]
+  const parts = url.pathname.split('/').filter(Boolean); // ['threadtrail', ...]
 
   if (parts.length === 2 && parts[1] === 'status.json' && req.method === 'GET') {
     const rows = [];
@@ -85,7 +85,7 @@ async function handle(req, res, { store, sessions }) {
     return;
   }
 
-  if (parts.length < 3 || parts[0] !== 'deltadb') {
+  if (parts.length < 3 || parts[0] !== 'threadtrail') {
     sendJson(res, 404, { error: 'not found' });
     return;
   }
@@ -104,7 +104,7 @@ async function handle(req, res, { store, sessions }) {
   }
   const cap = store.get(sessionId);
 
-  // ── notes: POST /deltadb/<sid>/notes, DELETE /deltadb/<sid>/notes/<id> ──
+  // ── notes: POST /threadtrail/<sid>/notes, DELETE /threadtrail/<sid>/notes/<id> ──
   if (parts[2] === 'notes' && parts.length === 3 && req.method === 'POST') {
     try {
       const body = await readBody(req);
@@ -132,7 +132,7 @@ async function handle(req, res, { store, sessions }) {
       const record = await cap.addNote({ path: String(body.path), startLine, endLine, snippet, note });
       sendJson(res, 200, record);
     } catch (err) {
-      sendJson(res, err?.code === 'DELTADB_BODY_TOO_LARGE' ? 413 : 400, { error: err?.message ?? 'bad request' });
+      sendJson(res, err?.code === 'THREADTRAIL_BODY_TOO_LARGE' ? 413 : 400, { error: err?.message ?? 'bad request' });
     }
     return;
   }
@@ -178,12 +178,12 @@ async function handle(req, res, { store, sessions }) {
       return;
     }
     const opId = parts[3].replace(/\.json$/, '');
-    const target = path.join(cap.cwd, `.deltadb`, 'rewinds', `${opId}-${Date.now()}`);
+    const target = path.join(cap.cwd, `.threadtrail`, 'rewinds', `${opId}-${Date.now()}`);
     try {
       const result = await cap.rewind(opId, target);
       sendJson(res, 200, result);
     } catch (err) {
-      sendJson(res, err.code === 'DELTADB_OP_NOT_FOUND' ? 404 : 500, { error: err.message });
+      sendJson(res, err.code === 'THREADTRAIL_OP_NOT_FOUND' ? 404 : 500, { error: err.message });
     }
     return;
   }
@@ -214,7 +214,7 @@ async function handle(req, res, { store, sessions }) {
       sendJson(res, 200, { ...data, ops, notes });
     } catch (err) {
       const status =
-        err.code === 'DELTADB_PATH_ESCAPE' ? 400 : err.code === 'DELTADB_NO_FILE' ? 404 : 400;
+        err.code === 'THREADTRAIL_PATH_ESCAPE' ? 400 : err.code === 'THREADTRAIL_NO_FILE' ? 404 : 400;
       sendJson(res, status, { error: err.message });
     }
     return;

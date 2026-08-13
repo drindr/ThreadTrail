@@ -1,5 +1,5 @@
 /**
- * DeltaDB-lite capture engine.
+ * ThreadTrail capture engine.
  *
  * Records every file-system change of a session's workspace with a stable
  * identity, linked to the conversation event that bracketed it. It is a
@@ -7,7 +7,7 @@
  * types on replay, so the op log lives beside it and references session
  * event seqs).
  *
- * Storage layout under `$DSH_HOME/deltadb/`:
+ * Storage layout under `$DSH_HOME/threadtrail/`:
  *   blobs/<sha256>          content-addressed file contents (deduped across
  *                           sessions and ops)
  *   sessions/<sessionId>.jsonl   append-only op records (one JSON object per
@@ -47,7 +47,7 @@ try {
 }
 
 export const IGNORE_NAMES = new Set([
-  '.git', 'node_modules', '.deltadb', 'target', 'dist', 'build', 'out',
+  '.git', 'node_modules', '.threadtrail', 'target', 'dist', 'build', 'out',
   '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.DS_Store',
   '.idea', '.vscode', 'coverage', '.turbo', '.cache', '.pytest_cache',
 ]);
@@ -243,12 +243,12 @@ async function hashBatch(paths, manifest, sc) {
 
 export class CaptureStore {
   /**
-   * @param {{ root: string }} opts - `root` is the deltadb data directory
-   *   (defaults to `$DSH_HOME/deltadb`).
+   * @param {{ root: string }} opts - `root` is the threadtrail data directory
+   *   (defaults to `$DSH_HOME/threadtrail`).
    */
   constructor({ root } = {}) {
     // Canonical harness home (DSH_HOME, or ~/.dsh) — never the bare home dir.
-    this.root = root || dshHomePath('deltadb');
+    this.root = root || dshHomePath('threadtrail');
     this.blobsDir = path.join(this.root, 'blobs');
     this.sessionsDir = path.join(this.root, 'sessions');
     this.notesDir = path.join(this.root, 'notes');
@@ -546,7 +546,7 @@ class SessionCapture {
     const idx = this.ops.findIndex((o) => o.id === opId);
     if (idx < 0) {
       const err = new Error(`op not found: ${opId}`);
-      err.code = 'DELTADB_OP_NOT_FOUND';
+      err.code = 'THREADTRAIL_OP_NOT_FOUND';
       throw err;
     }
     /** @type {Map<string, {sha: string|null, deleted: boolean}>} */
@@ -657,19 +657,19 @@ class SessionCapture {
 
   /**
    * Read a workspace file's current content, guarded against path traversal
-   * (lexical and symlink escapes refused; missing files -> DELTADB_NO_FILE).
+   * (lexical and symlink escapes refused; missing files -> THREADTRAIL_NO_FILE).
    * @returns {Promise<{path: string, content: string, truncated: boolean, lines: number}>}
-   * @throws {Error} with `code` DELTADB_NO_CWD / DELTADB_PATH_ESCAPE / DELTADB_NO_FILE
+   * @throws {Error} with `code` THREADTRAIL_NO_CWD / THREADTRAIL_PATH_ESCAPE / THREADTRAIL_NO_FILE
    */
   async readFile(rel) {
-    if (!this.cwd) throw errWith('session has no workspace', 'DELTADB_NO_CWD');
+    if (!this.cwd) throw errWith('session has no workspace', 'THREADTRAIL_NO_CWD');
     const abs = await this.resolveWorkspacePath(rel);
-    if (!abs) throw errWith('path escapes the workspace', 'DELTADB_PATH_ESCAPE');
+    if (!abs) throw errWith('path escapes the workspace', 'THREADTRAIL_PATH_ESCAPE');
     let content;
     try {
       content = await fs.readFile(abs, 'utf8');
     } catch {
-      throw errWith('file is missing or unreadable', 'DELTADB_NO_FILE');
+      throw errWith('file is missing or unreadable', 'THREADTRAIL_NO_FILE');
     }
     const MAX_FILE = 512 * 1024;
     let truncated = false;

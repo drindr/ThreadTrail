@@ -1,7 +1,7 @@
 /**
- * The agent-facing `deltadb` tool: lets the model itself draw on the captured
+ * The agent-facing `threadtrail` tool: lets the model itself draw on the captured
  * history — "what did I change in this session", "why was this line written",
- * "rewind to that point" — the DeltaDB idea that agents pick up the context
+ * "rewind to that point" — the ThreadTrail idea that agents pick up the context
  * behind the code they are touching.
  */
 
@@ -14,14 +14,14 @@ const ACTIONS = [
   ['list', 'List captured ops (file changes between turns) for a session, newest first.'],
   ['where', 'Given a file path, list every op that touched it plus the prompts that drove them (code -> conversation).'],
   ['why', 'Given an op id or turn number, show what changed and the conversation behind it (conversation -> code).'],
-  ['rewind', 'Materialize the workspace state right after an op into a fresh directory under <cwd>/.deltadb/rewinds (non-destructive).'],
+  ['rewind', 'Materialize the workspace state right after an op into a fresh directory under <cwd>/.threadtrail/rewinds (non-destructive).'],
 ].map(([name, description]) => ({ name, description }));
 
-export function deltadbTool({ store, sessions }) {
+export function threadtrailTool({ store, sessions }) {
   return defineTool({
-    name: 'deltadb',
+    name: 'threadtrail',
     description:
-      'Query the DeltaDB-lite operation log of this session: every file edit between turns, ' +
+      'Query the ThreadTrail operation log of this session: every file edit between turns, ' +
       'linked to the conversation that produced it. Use it to answer "what changed here", ' +
       '"why was this line written", or to materialize the code as it was at any past point. ' +
       `Actions: ${ACTIONS.map((a) => `${a.name} (${a.description})`).join('; ')}.`,
@@ -57,7 +57,7 @@ export function deltadbTool({ store, sessions }) {
         const sessionId = args.sessionId || exec?.agent?.sessionId || null;
         return await run(args, sessionId, store, sessions);
       } catch (err) {
-        return `deltadb error: ${err && err.message ? err.message : String(err)}`;
+        return `threadtrail error: ${err && err.message ? err.message : String(err)}`;
       }
     },
   });
@@ -70,7 +70,7 @@ async function run(args, sessionId, store, sessions) {
     for (const [id, sc] of store.sessions) {
       rows.push(`- ${id}  cwd=${sc.cwd ?? '(none)'}  ops=${sc.ops.length}`);
     }
-    return `DeltaDB-lite capture root: ${store.root}\nSessions tracked: ${store.sessions.size}\n${rows.join('\n') || '  (no sessions yet — capture starts at the next turn boundary)'}`;
+    return `ThreadTrail capture root: ${store.root}\nSessions tracked: ${store.sessions.size}\n${rows.join('\n') || '  (no sessions yet — capture starts at the next turn boundary)'}`;
   }
 
   if (!sessionId) return 'No session id available (run from a session, or pass sessionId).';
@@ -142,7 +142,7 @@ async function run(args, sessionId, store, sessions) {
     const opId = args.opId;
     if (!opId) return 'action=rewind requires opId.';
     if (!cap.cwd) return 'Session has no workspace to rewind into.';
-    const target = pathJoinSafe(cap.cwd, `.deltadb/rewinds/${opId}-${Date.now()}`);
+    const target = pathJoinSafe(cap.cwd, `.threadtrail/rewinds/${opId}-${Date.now()}`);
     const result = await cap.rewind(opId, target);
     return `Materialized workspace state after ${opId} into ${result.target}\n` +
       result.files.map((f) => `  ${f.state === 'deleted' ? '(absent)' : 'written'} ${f.path}`).join('\n') +

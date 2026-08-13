@@ -1,6 +1,6 @@
-# deltadb-client
+# threadtrail-client
 
-The browser half of **DeltaDB-lite** for DeepSeek Harness: a panel in the
+The browser half of **ThreadTrail** for DeepSeek Harness: a panel in the
 session-scoped `details` column (the right-hand pane) showing the captured
 operation timeline between commits.
 
@@ -22,7 +22,7 @@ operation timeline between commits.
 - **Anchored notes** — select code in the viewer; a floating composer saves a
   note pinned to the line range (with the selected snippet). Notes are marked
   in the gutter, listed under the file, and click-to-jump back to the line
-  (backed by `POST/DELETE /deltadb/<sessionId>/notes`).
+  (backed by `POST/DELETE /threadtrail/<sessionId>/notes`).
 - **Expandable overlay** — the details column is capped at 520px by the shell
   layout, so entering the Worktree tab **auto-opens a wide overlay**
   (`shell.overlay`, up to 72vw / 1000px) with a side-by-side tree + viewer;
@@ -30,7 +30,7 @@ operation timeline between commits.
   auto-open for that session; reopen via the ⛶ header button or the
   "Open wide review" banner inside the pane.
 - **Rewind** — per-op "rewind workspace to this point": the host materializes
-  the state right after that op into `<cwd>/.deltadb/rewinds/<opId>-<ts>/`
+  the state right after that op into `<cwd>/.threadtrail/rewinds/<opId>-<ts>/`
   (non-destructive; files never touched by captured history are not copied).
 - **Live-ish updates** — the panel refetches the digest (and the open file)
   whenever the conversation window changes (turn boundaries, tool results)
@@ -43,20 +43,20 @@ loader, exactly like the shipped client plugins — zero build step. The
 factory's `require` resolves `react` and the dsh packages through the loader's
 module table at runtime. `exports["./client"]` points at this file, and the
 package's `dsh.client` declaration tells the modules node half to serve it
-under `/plugins/deltadb-client/client.js`.
+under `/plugins/threadtrail-client/client.js`.
 
 ## Install (web profile)
 
 ```sh
-dsh plugin --profile web add file:/path/to/deltadb-client
+dsh plugin --profile web add file:/path/to/threadtrail-client
 ```
 
 and add a row to `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
 ```yaml
 - insert:
-    - id: deltadb-client
-      name: deltadb-client
+    - id: threadtrail-client
+      name: threadtrail-client
 ```
 
 The panel occupies the `details` slot declared by `dsh-client-ui-layout`; it

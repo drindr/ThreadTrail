@@ -1,5 +1,5 @@
 /**
- * DeltaDB-lite — browser half.
+ * ThreadTrail — browser half.
  *
  * A panel in the session-scoped `details` column: operation timeline between
  * commits, a realtime worktree review (file browser + syntax-highlighted
@@ -14,7 +14,7 @@
  * worktree store are self-contained inside the bundle.
  */
 window.__ModuleLoader__.load({
-  id: "deltadb-client",
+  id: "threadtrail-client",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
@@ -29,14 +29,14 @@ window.__ModuleLoader__.load({
     const createElement = React.createElement;
     const Fragment = React.Fragment;
 
-    const NS = "deltadb";
+    const NS = "threadtrail";
     const en = {
-      "panel.title": "DeltaDB",
+      "panel.title": "ThreadTrail",
       "panel.subtitle": "software is made between commits",
       "panel.refresh": "Refresh",
       "panel.expand": "Expand worktree",
       "panel.loading": "Loading…",
-      "panel.error": "DeltaDB host not reachable ({error})",
+      "panel.error": "ThreadTrail host not reachable ({error})",
       "panel.tab.timeline": "Timeline",
       "panel.tab.worktree": "Worktree",
     };
@@ -266,7 +266,7 @@ window.__ModuleLoader__.load({
           const seq = ++fetchSeq;
           this.set({ treeError: null });
           try {
-            const t = await hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/tree.json`);
+            const t = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/tree.json`);
             if (seq !== fetchSeq) return;
             this.set({ tree: t, treeError: null });
           } catch (e) {
@@ -277,7 +277,7 @@ window.__ModuleLoader__.load({
           const seq = ++fetchSeq;
           this.set({ openPath: rel, fileData: null, fileError: null, fileLoading: true, selection: null, noteDraft: "" });
           try {
-            const d = await hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/file.json?path=${encodeURIComponent(rel)}`);
+            const d = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/file.json?path=${encodeURIComponent(rel)}`);
             if (seq !== fetchSeq) return;
             this.set({ fileData: d, fileError: null, fileLoading: false });
           } catch (e) {
@@ -303,7 +303,7 @@ window.__ModuleLoader__.load({
           if (!s.selection || !s.noteDraft.trim() || s.saving) return;
           this.set({ saving: true });
           try {
-            await hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/notes`, undefined, {
+            await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/notes`, undefined, {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({
@@ -323,7 +323,7 @@ window.__ModuleLoader__.load({
         async deleteNote(sessionId, id) {
           const s = this.get();
           try {
-            await hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/notes/${encodeURIComponent(id)}`, undefined, { method: "DELETE" });
+            await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/notes/${encodeURIComponent(id)}`, undefined, { method: "DELETE" });
             if (s.openPath) this.openFile(sessionId, s.openPath);
           } catch (e) {
             this.set({ fileError: `delete failed: ${e.message}` });
@@ -368,7 +368,7 @@ window.__ModuleLoader__.load({
         async (signal) => {
           if (!sessionId) return;
           try {
-            const d = await hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/digest.json`, signal);
+            const d = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/digest.json`, signal);
             setDigest(d);
             setError(null);
           } catch (e) {
@@ -424,14 +424,14 @@ window.__ModuleLoader__.load({
 
       const openOp = (opId) => {
         setRewindInfo(null);
-        hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/op/${encodeURIComponent(opId)}.json`)
+        hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/op/${encodeURIComponent(opId)}.json`)
           .then(setOpRecord)
           .catch((e) => setError(e.message));
       };
 
       const doRewind = (opId) => {
         setRewindInfo({ pending: opId });
-        hostFetch(`/deltadb/${encodeURIComponent(sessionId)}/rewind/${encodeURIComponent(opId)}.json`)
+        hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/rewind/${encodeURIComponent(opId)}.json`)
           .then((r) => setRewindInfo({ ok: true, target: r.target, count: r.files.length }))
           .catch((e) => setRewindInfo({ err: e.message }));
       };
@@ -455,7 +455,7 @@ window.__ModuleLoader__.load({
         createElement(
           "div",
           { className: "ddb-title" },
-          createElement("span", { className: "ddb-title-main" }, "DeltaDB"),
+          createElement("span", { className: "ddb-title-main" }, "ThreadTrail"),
           createElement("span", { className: "ddb-title-sub" }, "software is made between commits"),
         ),
         createElement(
@@ -476,7 +476,7 @@ window.__ModuleLoader__.load({
 
       let body;
       if (error && !digest) {
-        body = createElement("div", { className: "ddb-note ddb-error" }, `DeltaDB host: ${error}`);
+        body = createElement("div", { className: "ddb-note ddb-error" }, `ThreadTrail host: ${error}`);
       } else if (!digest) {
         body = createElement("div", { className: "ddb-note" }, "Loading…");
       } else if (opRecord) {
@@ -935,7 +935,7 @@ window.__ModuleLoader__.load({
           "div",
           { className: "ddb-overlay" },
           createElement("div", { className: "ddb-overlay-head" },
-            createElement("span", { className: "ddb-overlay-title" }, "DeltaDB — worktree review"),
+            createElement("span", { className: "ddb-overlay-title" }, "ThreadTrail — worktree review"),
             createElement("span", { className: "ddb-overlay-session" }, sessionId),
             createElement("button", { type: "button", className: "ddb-iconbtn", title: "close", onClick: () => worktreeStore.closeOverlay() }, "✕"),
           ),
@@ -960,15 +960,15 @@ window.__ModuleLoader__.load({
     const inject = ["slots", "locale", "layout"];
 
     function apply(ctx) {
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), "deltadb-client: dictionaries");
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), "threadtrail-client: dictionaries");
       ctx.effect(() => {
         // Owned stylesheet (the loader removes <style data-plugin> on reload).
         const style = document.createElement("style");
-        style.setAttribute("data-plugin", "deltadb-client");
+        style.setAttribute("data-plugin", "threadtrail-client");
         style.textContent = CSS;
         document.head.appendChild(style);
         return () => style.remove();
-      }, "deltadb-client: styles");
+      }, "threadtrail-client: styles");
 
       // The `details` column is declared session-scoped by ui-layout; this
       // panel is its occupant. openDetails comes from the layout service so
@@ -991,7 +991,7 @@ window.__ModuleLoader__.load({
       ctx.slots.register(
         {
           name: "shell.overlay",
-          id: "deltadb-overlay",
+          id: "threadtrail-overlay",
           locale: NS,
           inject: () => ({}),
         },

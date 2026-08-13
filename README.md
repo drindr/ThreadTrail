@@ -1,7 +1,7 @@
-# DeltaDB-lite for DeepSeek Harness
+# ThreadTrail for DeepSeek Harness
 
 A single-user "software is made between commits" plugin set for the DeepSeek
-Harness **web** profile — the DeltaDB effect (operation log between commits,
+Harness **web** profile — the ThreadTrail effect (operation log between commits,
 code ↔ conversation tracing, rewind to any point, agent-queryable history)
 without real multiplayer.
 
@@ -9,24 +9,24 @@ without real multiplayer.
 
 | package | role |
 |---|---|
-| [`deltadb-server`](deltadb-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/deltadb/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), registers the agent-facing `deltadb` tool, and serves `/deltadb/...` HTTP routes (digest, op detail, non-destructive rewind). |
-| [`deltadb-client`](deltadb-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, and one-click rewind. Zero-build classic-script bundle. |
+| [`threadtrail-server`](threadtrail-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
+| [`threadtrail-client`](threadtrail-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, and one-click rewind. Zero-build classic-script bundle. |
 
 ## How it works
 
 - **Capture** runs at turn boundaries (`turn/start` records manual edits,
   `turn/end` records the agent's edits for that turn), content-hash based for
   correctness on coarse-granularity filesystems. Ignored: `.git`,
-  `node_modules`, `.deltadb`, `target`, `dist`, `build`, `venv`, …; files
+  `node_modules`, `.threadtrail`, `target`, `dist`, `build`, `venv`, …; files
   > 20 MB excluded.
 - **Stable identity** = `(sessionId, opId)`; ops reference the session event
   seq that bracketed them (`atSeq`), so the op log and the conversation log
   stay addressable together.
 - **Rewind** is non-destructive: it materializes the workspace state right
-  after an op into `<cwd>/.deltadb/rewinds/<opId>-<ts>/` (delta snapshot: files
+  after an op into `<cwd>/.threadtrail/rewinds/<opId>-<ts>/` (delta snapshot: files
   never touched by captured history are not copied).
 - **Realtime worktree review**: the panel's Worktree tab lists the workspace
-  files (`/deltadb/<sessionId>/tree.json`), reads any file
+  files (`/threadtrail/<sessionId>/tree.json`), reads any file
   (`…/file.json?path=…`, symlink- and traversal-guarded), highlights the lines
   the latest op changed (anchored by per-op `newRanges` recorded at capture),
   and shows the file's full op history with prompt previews — refreshed on
@@ -37,10 +37,10 @@ without real multiplayer.
   side-by-side tree + viewer.
 - **Anchored notes** ("notation on selected text"): select code in the viewer
   and press save on the floating note composer — the note is stored
-  (`POST /deltadb/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
+  (`POST /threadtrail/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
   range and snippet, marked in the gutter, listed under the file, and
   click-to-jump back to the line.
-- **The agent can query its own history** via the `deltadb` tool
+- **The agent can query its own history** via the `threadtrail` tool
   (`status | list | where <path> | why <opId|turn> | rewind <opId>`).
 
 ## Install
@@ -49,17 +49,17 @@ Already done for this machine's web profile; to reproduce elsewhere:
 
 ```sh
 # from the repo root
-dsh plugin --profile web add file:$PWD/deltadb-server file:$PWD/deltadb-client
+dsh plugin --profile web add file:$PWD/threadtrail-server file:$PWD/threadtrail-client
 ```
 
 Then add to `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
 ```yaml
 - insert:
-    - id: deltadb-server
-      name: deltadb-server
-    - id: deltadb-client
-      name: deltadb-client
+    - id: threadtrail-server
+      name: threadtrail-server
+    - id: threadtrail-client
+      name: threadtrail-client
 ```
 
 > pnpm `file:` deps are **copied**, not linked: after editing the source,
@@ -75,9 +75,9 @@ The running web GUI predates the plugin — restart it:
 3. Hard-refresh the browser tab (the client bundle is composed into the page's
    boot graph at load time).
 
-Then: open any session with a conversation and the **DeltaDB** panel appears in
+Then: open any session with a conversation and the **ThreadTrail** panel appears in
 the right-hand column (it auto-opens the details column; close it like any
-panel). `curl http://127.0.0.1:3080/deltadb/status.json` confirms the server
+panel). `curl http://127.0.0.1:3080/threadtrail/status.json` confirms the server
 half.
 
 ## What to expect / known tradeoffs
@@ -87,10 +87,10 @@ half.
   session) are not in the log.
 - The panel occupies the `details` column at `priority: -1`, shadowing
   ui-conversation's built-in tool-inspector panel (single slot, lowest priority
-  wins). Restore coexistence by moving the DeltaDB panel to a different
+  wins). Restore coexistence by moving the ThreadTrail panel to a different
   surface.
-- The headless profile on this machine also carries `deltadb-server` (a
-  smoke-test bed): `dsh --profile headless "use the deltadb tool to list what changed"`.
+- The headless profile on this machine also carries `threadtrail-server` (a
+  smoke-test bed): `dsh --profile headless "use the threadtrail tool to list what changed"`.
   Remove the two lines from `profiles/headless/cordis.patch.yml` to disable.
 - Multi-machine replication, virtualized worktrees, and shared threads are
   deliberately out of scope (single user + agent collaboration).
@@ -98,7 +98,7 @@ half.
 ## Tests
 
 ```sh
-cd deltadb-server && node --test 'test/*.test.mjs'   # capture engine + routes
+cd threadtrail-server && node --test 'test/*.test.mjs'   # capture engine + routes
 # client bundle: loads under the module-loader contract and renders (see the
 # verification script used during development)
 ```
