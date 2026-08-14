@@ -24,6 +24,12 @@ operation timeline between commits.
   yet) the `details` column is hidden, so a ThreadTrail button in the sidebar
   footer opens the same wide worktree review for the current session — read
   the code before the agent has changed anything.
+- **Clean on commit** — the op list is "between commits" data; once the
+  workspace is committed the state is preserved in git, so the log is safe to
+  clear. The server detects a moved git HEAD at capture time and resets the
+  log automatically (the timeline notes "reset after commit <sha>"); a
+  **clean** button in the panel header does the same on demand after a confirm
+  dialog. The digest reports `gitHead` and `lastClean` for the UI.
 - **Anchored notes** — select code in the viewer; a floating composer saves a
   note pinned to the line range (with the selected snippet). Notes are marked
   in the gutter, listed under the file, and click-to-jump back to the line

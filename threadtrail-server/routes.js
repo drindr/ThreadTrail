@@ -143,6 +143,22 @@ async function handle(req, res, { store, sessions }) {
     return;
   }
 
+  // Manual clean: clear the captured op list. Safe after a commit (the
+  // workspace state is preserved in git); the baseline re-establishes at the
+  // next capture scan. Commits are also detected automatically at scan time.
+  if (parts[2] === 'clean' && parts.length === 3 && req.method === 'POST') {
+    await cap.resetOps({ trigger: 'manual' });
+    sendJson(res, 200, {
+      ok: true,
+      ops: cap.ops.length,
+      gitHead: cap.lastHead ?? null,
+      lastClean: cap.lastCleanTrigger
+        ? { sha: cap.lastCleanSha ?? null, time: cap.lastCleanTime, trigger: cap.lastCleanTrigger }
+        : null,
+    });
+    return;
+  }
+
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: 'method not allowed' });
     return;

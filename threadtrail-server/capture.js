@@ -63,6 +63,59 @@ export function sha256(text) {
 }
 
 /**
+ * Resolve the current git HEAD commit sha of a workspace without spawning
+ * git: reads `.git/HEAD` (handles both a `.git` directory and a worktree /
+ * submodule `.git` file pointing at a gitdir), follows symbolic refs, and
+ * falls back to packed-refs.
+ * @returns {Promise<string|null>} the HEAD sha (lowercase, 40 hex), or null
+ *   when the directory is not inside a git repository.
+ */
+export async function gitHead(cwd) {
+  const gitPath = path.join(cwd, '.git');
+  let gitDir = gitPath;
+  try {
+    const st = await fs.stat(gitPath);
+    if (st.isFile()) {
+      const content = await fs.readFile(gitPath, 'utf8');
+      const m = /^gitdir:\s*(.+)$/m.exec(content);
+      if (!m) return null;
+      gitDir = path.resolve(cwd, m[1].trim());
+    }
+  } catch {
+    return null; // no .git at all — not a git workspace
+  }
+  let head;
+  try {
+    head = (await fs.readFile(path.join(gitDir, 'HEAD'), 'utf8')).trim();
+  } catch {
+    return null;
+  }
+  const ref = /^ref:\s*(\S+)$/.exec(head);
+  if (ref) {
+    try {
+      head = (await fs.readFile(path.join(gitDir, ref[1]), 'utf8')).trim();
+    } catch {
+      // the ref is packed — look it up in packed-refs
+      try {
+        const packed = await fs.readFile(path.join(gitDir, 'packed-refs'), 'utf8');
+        let found = null;
+        for (const line of packed.split('\n')) {
+          const pm = /^([0-9a-f]{40,})\s+(\S+)$/.exec(line.trim());
+          if (pm && pm[2] === ref[1]) {
+            found = pm[1];
+            break;
+          }
+        }
+        head = found ?? '';
+      } catch {
+        head = '';
+      }
+    }
+  }
+  return /^[0-9a-f]{40}$/.test(head) ? head : null;
+}
+
+/**
  * Compute a line diff between two texts.
  * @returns {{ added: number, removed: number, lines: Array<{t: ' '|'+'|'-', text: string}> }}
  */
@@ -305,10 +358,20 @@ class SessionCapture {
     this.notesLoaded = false;
     this.loaded = false;
     this.baselined = false;
+    // git HEAD bookkeeping: the last HEAD seen and the last op-list reset
+    // (persisted so restarts do not re-trigger a reset for the same commit).
+    this.lastHead = null;
+    this.lastCleanSha = null;
+    this.lastCleanTime = null;
+    this.lastCleanTrigger = null;
   }
 
   jsonlPath() {
     return path.join(this.store.sessionsDir, `${this.sessionId}.jsonl`);
+  }
+
+  headPath() {
+    return path.join(this.store.sessionsDir, `${this.sessionId}.head.json`);
   }
 
   notesPath() {
@@ -402,6 +465,33 @@ class SessionCapture {
     } catch {
       // no log yet
     }
+    try {
+      const rec = JSON.parse(await fs.readFile(this.headPath(), 'utf8'));
+      this.lastHead = rec.head ?? null;
+      this.lastCleanSha = rec.lastCleanSha ?? null;
+      this.lastCleanTime = rec.lastCleanTime ?? null;
+      this.lastCleanTrigger = rec.lastCleanTrigger ?? null;
+    } catch {
+      // no head record yet
+    }
+  }
+
+  /** Persist the git-HEAD / last-reset bookkeeping (best-effort). */
+  async saveHead() {
+    try {
+      await fs.writeFile(
+        this.headPath(),
+        JSON.stringify({
+          head: this.lastHead ?? null,
+          lastCleanSha: this.lastCleanSha ?? null,
+          lastCleanTime: this.lastCleanTime ?? null,
+          lastCleanTrigger: this.lastCleanTrigger ?? null,
+        }),
+        'utf8',
+      );
+    } catch {
+      // best-effort persistence
+    }
   }
 
   async writeBlob(content) {
@@ -421,6 +511,32 @@ class SessionCapture {
     } catch {
       return '';
     }
+  }
+
+  /**
+   * Clear the captured op list and re-arm the baseline. Safe after a git
+   * commit — the workspace state is preserved in git, so the "between
+   * commits" granularity up to that point can be dropped. The next scan
+   * re-establishes the baseline against the current workspace, so subsequent
+   * edits are recorded as ops starting from op-1. Notes and conversation
+   * attribution state (lastUserSeq, per-turn assistant seqs) are kept.
+   * @param {{ trigger: 'commit'|'manual', sha?: string|null }} opts
+   */
+  async resetOps({ trigger, sha = null } = {}) {
+    await this.load();
+    this.ops = [];
+    this.opCounter = 0;
+    this.manifest = new Map();
+    this.baselined = false;
+    this.lastCleanSha = sha ?? this.lastHead ?? null;
+    this.lastCleanTime = Date.now();
+    this.lastCleanTrigger = trigger;
+    try {
+      await fs.writeFile(this.jsonlPath(), '', 'utf8');
+    } catch {
+      // best-effort persistence
+    }
+    await this.saveHead();
   }
 
   /**
@@ -450,6 +566,18 @@ class SessionCapture {
     // same-bucket rewrites, so timestamp-based change detection is unreliable.
     // Content hashing is always correct; scans run at turn boundaries only.
     await hashBatch(pending, next, this);
+
+    // Git commit detection: a moved HEAD means the workspace state is baked
+    // into git, so the captured "between commits" ops are safe to clear. The
+    // current scan then just re-establishes the baseline (no op is recorded).
+    const head = await gitHead(this.cwd);
+    if (head && this.lastHead && head !== this.lastHead) {
+      await this.resetOps({ trigger: 'commit', sha: head });
+    }
+    if (head !== this.lastHead) {
+      this.lastHead = head;
+      await this.saveHead();
+    }
 
     // The first scan only establishes the baseline; nothing is recorded.
     if (!this.baselined) {
@@ -605,7 +733,17 @@ class SessionCapture {
       t.opIds.push(o.id);
       for (const s of o.assistantSeqs) if (!t.assistantSeqs.includes(s)) t.assistantSeqs.push(s);
     }
-    return { sessionId: this.sessionId, cwd: this.cwd, ops, fileIndex, turnIndex };
+    return {
+      sessionId: this.sessionId,
+      cwd: this.cwd,
+      ops,
+      fileIndex,
+      turnIndex,
+      gitHead: this.lastHead ?? null,
+      lastClean: this.lastCleanTrigger
+        ? { sha: this.lastCleanSha ?? null, time: this.lastCleanTime, trigger: this.lastCleanTrigger }
+        : null,
+    };
   }
 
   async opRecord(opId) {

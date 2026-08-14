@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CaptureStore, computeDiff, computeRanges, sha256 } from '../capture.js';
+import { CaptureStore, computeDiff, computeRanges, gitHead, sha256 } from '../capture.js';
 
 async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-test-'));
@@ -143,6 +143,134 @@ test('worktree browsing works before any modification (session attached, no scan
   assert.equal(file.lines, 1);
   assert.deepEqual(sc.fileOps('a.txt'), []);
   assert.deepEqual(sc.digest().ops, []);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('gitHead resolves HEAD across git layouts', async () => {
+  const root = await tempDir();
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+  const c = 'c'.repeat(40);
+  const d = 'd'.repeat(40);
+  const e = 'e'.repeat(40);
+
+  // symbolic ref: .git directory, refs/heads/main
+  const ws = path.join(root, 'ws');
+  await fs.mkdir(path.join(ws, '.git', 'refs', 'heads'), { recursive: true });
+  await fs.writeFile(path.join(ws, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+  await fs.writeFile(path.join(ws, '.git', 'refs', 'heads', 'main'), a + '\n', 'utf8');
+  assert.equal(await gitHead(ws), a);
+
+  // detached HEAD
+  await fs.writeFile(path.join(ws, '.git', 'HEAD'), b + '\n', 'utf8');
+  assert.equal(await gitHead(ws), b);
+
+  // worktree-style .git file pointing at a gitdir
+  const sub = path.join(root, 'sub');
+  await fs.mkdir(sub, { recursive: true });
+  await fs.mkdir(path.join(root, 'other-git'), { recursive: true });
+  await fs.writeFile(path.join(sub, '.git'), 'gitdir: ' + path.join(root, 'other-git') + '\n', 'utf8');
+  await fs.writeFile(path.join(root, 'other-git', 'HEAD'), c + '\n', 'utf8');
+  assert.equal(await gitHead(sub), c);
+
+  // packed-refs fallback: symbolic HEAD whose ref file is missing
+  const pk = path.join(root, 'packed');
+  await fs.mkdir(path.join(pk, '.git'), { recursive: true });
+  await fs.writeFile(path.join(pk, '.git', 'HEAD'), 'ref: refs/heads/feature\n', 'utf8');
+  await fs.writeFile(
+    path.join(pk, '.git', 'packed-refs'),
+    `${d} refs/heads/feature\n${e} refs/heads/main\n`,
+    'utf8',
+  );
+  assert.equal(await gitHead(pk), d);
+
+  // not a git repo at all
+  const plain = path.join(root, 'plain');
+  await fs.mkdir(plain, { recursive: true });
+  assert.equal(await gitHead(plain), null);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('a moved git HEAD (a commit) automatically cleans the op list', async () => {
+  const root = await tempDir();
+  const ws = path.join(root, 'ws');
+  await fs.mkdir(path.join(ws, '.git', 'refs', 'heads'), { recursive: true });
+  await fs.writeFile(path.join(ws, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+  const headFile = path.join(ws, '.git', 'refs', 'heads', 'main');
+  const shaA = 'a'.repeat(40);
+  const shaB = 'b'.repeat(40);
+  await fs.writeFile(headFile, shaA + '\n', 'utf8');
+  await write(path.join(ws, 'a.txt'), 'v1\n');
+
+  const store = new CaptureStore({ root: path.join(root, 'data') });
+  await store.init();
+  const sc = store.getOrCreate('sess-g', ws);
+
+  // baseline scan records the HEAD (no ops yet)
+  await sc.scan({ trigger: 'turn/start', atSeq: 1, turn: null, userMessageSeq: null, assistantSeqs: [] });
+  assert.equal(sc.ops.length, 0);
+  assert.equal(sc.lastHead, shaA);
+
+  // agent edits, turn ends -> op-1
+  await write(path.join(ws, 'a.txt'), 'v2\n');
+  await sc.scan({ trigger: 'turn/end', atSeq: 5, turn: 1, userMessageSeq: 3, assistantSeqs: [4] });
+  assert.equal(sc.ops.length, 1);
+  assert.equal(sc.ops[0].id, 'op-1');
+
+  // a commit moves HEAD; the next scan clears the log and re-baselines
+  await fs.writeFile(headFile, shaB + '\n', 'utf8');
+  const op = await sc.scan({ trigger: 'turn/start', atSeq: 9, turn: null, userMessageSeq: null, assistantSeqs: [] });
+  assert.equal(op, null);
+  assert.equal(sc.ops.length, 0);
+  assert.equal(sc.opCounter, 0);
+  assert.equal(sc.lastHead, shaB);
+  assert.equal(sc.lastCleanTrigger, 'commit');
+  assert.equal(sc.lastCleanSha, shaB);
+
+  // post-commit edits start a fresh op list from op-1
+  await write(path.join(ws, 'a.txt'), 'v3\n');
+  const op2 = await sc.scan({ trigger: 'turn/end', atSeq: 13, turn: 2, userMessageSeq: 11, assistantSeqs: [12] });
+  assert.equal(op2.id, 'op-1');
+  assert.equal(sc.ops.length, 1);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('manual resetOps clears the log and the HEAD bookkeeping survives a reload', async () => {
+  const root = await tempDir();
+  const ws = path.join(root, 'ws');
+  await fs.mkdir(path.join(ws, '.git', 'refs', 'heads'), { recursive: true });
+  await fs.writeFile(path.join(ws, '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+  const headFile = path.join(ws, '.git', 'refs', 'heads', 'main');
+  const shaA = 'a'.repeat(40);
+  await fs.writeFile(headFile, shaA + '\n', 'utf8');
+  await write(path.join(ws, 'a.txt'), 'v1\n');
+
+  const store = new CaptureStore({ root: path.join(root, 'data') });
+  await store.init();
+  const sc = store.getOrCreate('sess-g', ws);
+  await sc.scan({ trigger: 'turn/start', atSeq: 1, turn: null, userMessageSeq: null, assistantSeqs: [] });
+  await write(path.join(ws, 'a.txt'), 'v2\n');
+  await sc.scan({ trigger: 'turn/end', atSeq: 5, turn: 1, userMessageSeq: 3, assistantSeqs: [4] });
+  assert.equal(sc.ops.length, 1);
+
+  await sc.resetOps({ trigger: 'manual' });
+  assert.equal(sc.ops.length, 0);
+  assert.equal(sc.opCounter, 0);
+  assert.equal(sc.lastCleanTrigger, 'manual');
+  assert.equal(sc.lastHead, shaA);
+  assert.ok(!sc.baselined);
+
+  // a fresh store over the same root replays the (now empty) log and the
+  // HEAD bookkeeping; the unchanged HEAD must not re-trigger a clean
+  const store2 = new CaptureStore({ root: path.join(root, 'data') });
+  await store2.init();
+  const sc2 = store2.getOrCreate('sess-g', ws);
+  await sc2.load();
+  assert.equal(sc2.ops.length, 0);
+  assert.equal(sc2.lastHead, shaA);
+  await sc2.scan({ trigger: 'turn/start', atSeq: 10, turn: null, userMessageSeq: null, assistantSeqs: [] });
+  assert.equal(sc2.ops.length, 0);
+  assert.equal(sc2.lastCleanTrigger, 'manual');
   await fs.rm(root, { recursive: true, force: true });
 });
 

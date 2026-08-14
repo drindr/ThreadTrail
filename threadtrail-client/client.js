@@ -472,6 +472,16 @@ window.__ModuleLoader__.load({
         byTurn.set(op.turn, list);
       }
 
+      const doClean = () => {
+        if (!window.confirm("Clean the captured op list? Safe after a commit — the workspace state is preserved in git. Uncommitted edits in the log would be lost.")) return;
+        hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/clean`, undefined, { method: "POST" })
+          .then(() => {
+            setOpRecord(null);
+            return fetchDigest();
+          })
+          .catch((e) => setError(e.message));
+      };
+
       const header = createElement(
         "div",
         { className: "ddb-header" },
@@ -484,6 +494,11 @@ window.__ModuleLoader__.load({
         createElement(
           "div",
           { className: "ddb-header-actions" },
+          createElement(
+            "button",
+            { type: "button", className: "ddb-cleanbtn", title: "Clean the op list — safe after a commit (the workspace state is in git)", onClick: doClean },
+            "clean",
+          ),
           createElement(
             "button",
             { type: "button", className: "ddb-iconbtn", title: "Expand worktree", onClick: () => worktreeStore.openOverlay(sessionId) },
@@ -510,7 +525,7 @@ window.__ModuleLoader__.load({
       } else if (tab === "worktree") {
         body = createElement(WorktreeView, { sessionId, onOpenOp: openOp });
       } else {
-        body = renderTimeline(byTurn, manual, ops, openOp);
+        body = createElement(Fragment, null, cleanNote(digest), renderTimeline(byTurn, manual, ops, openOp));
       }
 
       const tabs = createElement(
@@ -534,6 +549,18 @@ window.__ModuleLoader__.load({
         header,
         tabs,
         createElement("div", { className: "ddb-body" }, body),
+      );
+    }
+
+    /** Note shown when the op list was reset (after a commit, or manually). */
+    function cleanNote(digest) {
+      const lc = digest && digest.lastClean;
+      if (!lc) return null;
+      const what = lc.trigger === "commit" ? `reset after commit ${lc.sha ? lc.sha.slice(0, 8) : "?"}` : "reset manually";
+      return createElement(
+        "div",
+        { className: "ddb-note ddb-clean-note" },
+        `Op list ${what} · ${fmtTime(lc.time)} — the timeline shows only edits since then.`,
       );
     }
 
@@ -1095,12 +1122,15 @@ window.__ModuleLoader__.load({
 .ddb-header-actions{display:flex;gap:4px}
 .ddb-iconbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1}
 .ddb-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.ddb-cleanbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;line-height:1}
+.ddb-cleanbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
 .ddb-tabs{display:flex;gap:4px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,#2a2a2a)}
 .ddb-tab{background:none;border:none;color:inherit;opacity:.6;cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px}
 .ddb-tab:hover{opacity:.9}
 .ddb-tab-active{opacity:1;background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
 .ddb-body{flex:1;overflow-y:auto;padding:8px 12px 16px}
 .ddb-note{opacity:.6;padding:12px 4px;line-height:1.5;font-size:12px}
+.ddb-clean-note{border:1px dashed var(--dsw-alias-border-l2,#333);border-radius:8px;margin-bottom:8px;padding:8px 10px}
 .ddb-error{color:var(--dsw-alias-state-error-primary,#d9534f)}
 .ddb-empty{opacity:.6;padding:16px 12px;font-size:12px}
 .ddb-group{margin-bottom:10px}

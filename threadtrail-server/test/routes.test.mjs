@@ -310,5 +310,32 @@ test('routes: digest, op, rewind, status, and error paths', async () => {
     assert.equal(res.status, 404);
   }
 
+  // clean: POST clears the op list (safe after a commit), and the digest then
+  // reports the reset plus the git HEAD bookkeeping
+  {
+    const res = mockRes();
+    await handler({ method: 'POST', url: '/threadtrail/sess-abc/clean' }, res);
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.chunks.join(''));
+    assert.equal(body.ok, true);
+    assert.equal(body.ops, 0);
+    assert.equal(body.lastClean.trigger, 'manual');
+  }
+  {
+    const res = mockRes();
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/digest.json' }, res);
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.chunks.join(''));
+    assert.deepEqual(body.ops, []);
+    assert.equal(body.lastClean.trigger, 'manual');
+    assert.ok('gitHead' in body);
+  }
+  // POST clean is the only clean path; GET is not a clean (falls through to 404)
+  {
+    const res = mockRes();
+    await handler({ method: 'GET', url: '/threadtrail/sess-abc/clean' }, res);
+    assert.equal(res.status, 404);
+  }
+
   await fs.rm(root, { recursive: true, force: true });
 });

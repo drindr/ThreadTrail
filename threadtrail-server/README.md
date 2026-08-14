@@ -19,6 +19,15 @@ and exposes it to both the agent and the browser.
 - **Agent-queryable.** Registers a global `threadtrail` tool (`status`, `list`,
   `where <path>`, `why <opId|turn>`, `rewind <opId>`) so the model can answer
   "what changed here" / "why was this line written" itself.
+- **Clean on commit.** The op log is "between commits" granularity, so once
+  the workspace is committed it is safe to clear. At every capture scan the
+  store resolves the workspace git HEAD (`.git/HEAD`, worktree/submodule
+  `.git` files, packed refs — no `git` binary required); a moved HEAD resets
+  the log and re-baselines automatically. `POST /threadtrail/<sessionId>/clean`
+  does the same on demand. The last seen HEAD and the last reset are persisted
+  per session (`sessions/<id>.head.json`), so a restart does not re-trigger a
+  reset for the same commit. The digest carries `gitHead` / `lastClean` for
+  the panel; notes and per-turn attribution state survive a reset.
 - **Browser routes** (web profile only): `GET /threadtrail/<sessionId>/digest.json`
   (op summaries + file index + prompt previews), `…/op/<opId>.json` (full diff),
   and `…/rewind/<opId>.json` (non-destructive materialization of the workspace

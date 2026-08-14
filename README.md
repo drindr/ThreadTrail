@@ -9,7 +9,7 @@ without real multiplayer.
 
 | package | role |
 |---|---|
-| [`threadtrail-server`](threadtrail-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
+| [`threadtrail-server`](threadtrail-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), **cleans the op list when a git commit is made** (HEAD-move detection at scan time) or on demand (`POST …/clean`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
 | [`threadtrail-client`](threadtrail-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, one-click rewind, and a sidebar entry that opens the worktree **before any modification** (fresh/blank sessions included). Zero-build classic-script bundle. |
 
 ## How it works
@@ -47,6 +47,15 @@ without real multiplayer.
   (`POST /threadtrail/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
   range and snippet, marked in the gutter, listed under the file, and
   click-to-jump back to the line.
+- **Clean on commit**: the op log is "between commits" granularity — once the
+  workspace is committed, that window is preserved in git, so the captured ops
+  are safe to clear. At every capture scan the server resolves the workspace
+  git HEAD (`.git/HEAD`, worktree/submodule `.git` files, packed refs — no git
+  binary needed); when HEAD moved, the op log is reset and re-baselined
+  automatically, and the timeline notes "reset after commit <sha>". A **clean**
+  button in the panel header does the same on demand (with a confirm dialog).
+  The last seen HEAD and reset marker are persisted per session, so restarts
+  do not re-trigger a reset for the same commit. Notes are kept.
 - **The agent can query its own history** via the `threadtrail` tool
   (`status | list | where <path> | why <opId|turn> | rewind <opId>`).
 
@@ -93,6 +102,11 @@ half.
   baseline, so edits from *before* the plugin was active (including this
   session) are not in the log. The worktree browser itself is unaffected —
   it reads the live workspace, so it works before the first baseline too.
+- Commits reset the op list (auto-detected HEAD move, or the manual clean
+  button). Any HEAD movement — commit, branch switch, reset — counts, since
+  in every case the workspace state is a git state. Pre-commit ops are gone
+  from the panel, but the code itself is preserved in git; uncommitted edits
+  in the log are lost when you clean manually (the dialog warns).
 - The panel occupies the `details` column at `priority: -1`, shadowing
   ui-conversation's built-in tool-inspector panel (single slot, lowest priority
   wins). Restore coexistence by moving the ThreadTrail panel to a different
