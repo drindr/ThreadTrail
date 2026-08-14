@@ -122,6 +122,30 @@ test('captures edits between turn boundaries and attributes them', async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test('worktree browsing works before any modification (session attached, no scan yet)', async () => {
+  const root = await tempDir();
+  const ws = path.join(root, 'ws');
+  await fs.mkdir(path.join(ws, 'src'), { recursive: true });
+  await write(path.join(ws, 'a.txt'), 'hello\n');
+  await write(path.join(ws, 'src', 'main.js'), 'export const x = 1;\n');
+
+  const store = new CaptureStore({ root: path.join(root, 'data') });
+  await store.init();
+  // A fresh session is attached on session/created with its cwd; no turn has
+  // run yet, so no scan and no ops — the user must still be able to browse.
+  const sc = store.getOrCreate('sess-fresh', ws);
+  assert.equal(sc.ops.length, 0);
+
+  const tree = await sc.tree();
+  assert.deepEqual(tree.files.map((f) => f.path).sort(), ['a.txt', 'src/main.js']);
+  const file = await sc.readFile('src/main.js');
+  assert.equal(file.content, 'export const x = 1;\n');
+  assert.equal(file.lines, 1);
+  assert.deepEqual(sc.fileOps('a.txt'), []);
+  assert.deepEqual(sc.digest().ops, []);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test('rewind materializes the state right after an op (including later edits and deletes)', async () => {
   const root = await tempDir();
   const ws = path.join(root, 'ws');

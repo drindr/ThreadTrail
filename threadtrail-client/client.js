@@ -659,7 +659,19 @@ window.__ModuleLoader__.load({
         createElement("button", { type: "button", className: "ddb-iconbtn", onClick: () => wt.sessionId && worktreeStore.fetchTree(wt.sessionId) }, "↻"),
       );
       if (wt.treeError) {
-        return createElement(Fragment, null, head, createElement("div", { className: "ddb-note ddb-error" }, `Worktree: ${wt.treeError}`));
+        const noWs = /no workspace/i.test(wt.treeError);
+        return createElement(
+          Fragment,
+          null,
+          head,
+          createElement(
+            "div",
+            { className: "ddb-note" + (noWs ? "" : " ddb-error") },
+            noWs
+              ? "This session has no workspace yet — pick a directory for it (workspace picker), then browse its code here."
+              : `Worktree: ${wt.treeError}`,
+          ),
+        );
       }
       if (!wt.tree) {
         return createElement(Fragment, null, head, createElement("div", { className: "ddb-note" }, "Loading worktree…"));
@@ -921,10 +933,15 @@ window.__ModuleLoader__.load({
     function WorktreeOverlay(props) {
       const wt = useWorktree();
       const useSessions = props.useSessions;
+      // Any current session qualifies — including a blank (pre-conversation)
+      // session, so the workspace can be browsed before the first modification.
       const currentId = useSessions
-        ? useSessions((s) => (s.current !== undefined && s.byId[s.current]?.blank === false ? s.current : undefined))
+        ? useSessions((s) => (s.current !== undefined ? s.current : undefined))
         : undefined;
       const sessionId = wt.sessionId || currentId;
+      useEffect(() => {
+        if (sessionId && wt.tree === null && !wt.treeError) worktreeStore.fetchTree(sessionId);
+      }, [sessionId, wt.tree, wt.treeError]);
       if (!wt.overlayOpen || !sessionId) return null;
 
       return createElement(
@@ -954,6 +971,29 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
+      );
+    }
+
+    /**
+     * Sidebar footer entry (always visible): open the worktree review for the
+     * current session. The details column is hidden while a session is still
+     * blank (before the first message/modification), so this is the entry that
+     * makes "browse the code before the modification occurs" possible.
+     */
+    function WorktreeFooterAction(props) {
+      const useSessions = props.useSessions;
+      const currentId = useSessions((s) => (s.current !== undefined ? s.current : undefined));
+      if (!currentId) return null;
+      return createElement(
+        "button",
+        {
+          type: "button",
+          className: "ddb-footbtn" + (props.wide ? " ddb-footbtn-wide" : ""),
+          title: "ThreadTrail — browse the workspace",
+          onClick: () => worktreeStore.openOverlay(currentId),
+        },
+        createElement("span", { className: "ddb-footbtn-icon" }, "⛶"),
+        props.wide ? createElement("span", { className: "ddb-footbtn-label" }, "ThreadTrail") : null,
       );
     }
 
@@ -997,10 +1037,27 @@ window.__ModuleLoader__.load({
         },
         WorktreeOverlay,
       );
+
+      // Always-available worktree trigger in the sidebar footer. Before the
+      // first modification the details column is hidden (the current session
+      // is still blank), so this button is what lets the user browse the
+      // workspace code from the very start.
+      ctx.slots.inject("sidebar.footer.action", () =>
+        ctx.slots.register(
+          {
+            name: "sidebar.footer.action",
+            id: "threadtrail-worktree",
+            locale: NS,
+            inject: () => ({}),
+          },
+          WorktreeFooterAction,
+        ),
+      );
     }
 
     exports.DeltaPanel = DeltaPanel;
     exports.WorktreeOverlay = WorktreeOverlay;
+    exports.WorktreeFooterAction = WorktreeFooterAction;
     exports.detectLang = detectLang;
     exports.createHighlighter = createHighlighter;
     exports.apply = apply;
@@ -1115,6 +1172,11 @@ window.__ModuleLoader__.load({
 .ddb-worksplit-viewer .ddb-filecontent{flex:1;overflow-y:auto}
 .ddb-worksplit-tree .ddb-tree{max-height:none;flex:1;overflow-y:auto}
 .ddb-overlay-body .ddb-tree{max-height:none;flex:1;overflow-y:auto}
+.ddb-footbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;min-width:32px;padding:0 8px;background:none;border:none;color:inherit;cursor:pointer;border-radius:8px;font-size:12px;flex:none}
+.ddb-footbtn:hover{background:var(--dsw-alias-interactive-bg-hover,#ffffff14)}
+.ddb-footbtn-wide{width:100%;justify-content:flex-start;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#333)}
+.ddb-footbtn-icon{font-size:14px;line-height:1}
+.ddb-footbtn-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (max-width: 720px){
 .ddb-worksplit{grid-template-columns:1fr}
 .ddb-worksplit-tree{display:none}

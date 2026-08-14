@@ -39,6 +39,59 @@ function makeHarness() {
   return root;
 }
 
+test('routes: worktree browse works for a session with no ops (before any modification)', async () => {
+  const root = await tempDir();
+  const ws = path.join(root, 'ws');
+  await fs.mkdir(path.join(ws, 'sub'), { recursive: true });
+  await fs.writeFile(path.join(ws, 'a.txt'), 'one\n', 'utf8');
+  await fs.writeFile(path.join(ws, 'sub', 'b.js'), 'const b = 2;\n', 'utf8');
+
+  const store = new CaptureStore({ root: path.join(root, 'data') });
+  await store.init();
+  // Attached on session/created with its cwd; no scan has run — the user
+  // browses the code before any modification has occurred.
+  store.getOrCreate('sess-fresh', ws);
+
+  const sessions = mockSessions({ 'sess-fresh': [] });
+  const routes = [];
+  const webServer = { register: (r) => routes.push(r) };
+  registerRoutes(webServer, { store, sessions });
+  const handler = routes[0].handler;
+
+  // digest: empty op list, still 200
+  {
+    const res = mockRes();
+    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/digest.json' }, res);
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.chunks.join(''));
+    assert.deepEqual(body.ops, []);
+    assert.deepEqual(body.fileIndex, {});
+  }
+
+  // tree: live workspace listing without any capture
+  {
+    const res = mockRes();
+    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/tree.json' }, res);
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.chunks.join(''));
+    assert.deepEqual(body.files.map((f) => f.path).sort(), ['a.txt', 'sub/b.js']);
+  }
+
+  // file: content + empty per-file op history
+  {
+    const res = mockRes();
+    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/file.json?path=sub/b.js' }, res);
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.chunks.join(''));
+    assert.equal(body.content, 'const b = 2;\n');
+    assert.equal(body.lines, 1);
+    assert.deepEqual(body.ops, []);
+    assert.deepEqual(body.notes, []);
+  }
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test('routes: digest, op, rewind, status, and error paths', async () => {
   const root = await tempDir();
   const ws = path.join(root, 'ws');

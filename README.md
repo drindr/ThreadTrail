@@ -10,7 +10,7 @@ without real multiplayer.
 | package | role |
 |---|---|
 | [`threadtrail-server`](threadtrail-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
-| [`threadtrail-client`](threadtrail-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, and one-click rewind. Zero-build classic-script bundle. |
+| [`threadtrail-client`](threadtrail-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, one-click rewind, and a sidebar entry that opens the worktree **before any modification** (fresh/blank sessions included). Zero-build classic-script bundle. |
 
 ## How it works
 
@@ -35,6 +35,13 @@ without real multiplayer.
   tokenizer with cross-line block comments; diffs highlight the code too). The
   ⛶ button expands the review into a wide overlay (`shell.overlay`) with a
   side-by-side tree + viewer.
+- **Browse before the modification**: the worktree is not tied to capture —
+  `tree.json`/`file.json` read the live workspace, so a session can be
+  browsed with **zero ops**. The `details` column is hidden while a session is
+  still blank (before its first message), so a ThreadTrail entry in the
+  sidebar footer (`sidebar.footer.action`) opens the wide worktree review for
+  the current session from the very start — read the code before asking the
+  agent to change anything.
 - **Anchored notes** ("notation on selected text"): select code in the viewer
   and press save on the floating note composer — the note is stored
   (`POST /threadtrail/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
@@ -84,7 +91,8 @@ half.
 
 - Capture starts fresh per session: the first turn of a session establishes the
   baseline, so edits from *before* the plugin was active (including this
-  session) are not in the log.
+  session) are not in the log. The worktree browser itself is unaffected —
+  it reads the live workspace, so it works before the first baseline too.
 - The panel occupies the `details` column at `priority: -1`, shadowing
   ui-conversation's built-in tool-inspector panel (single slot, lowest priority
   wins). Restore coexistence by moving the ThreadTrail panel to a different

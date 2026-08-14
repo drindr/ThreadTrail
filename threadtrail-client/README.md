@@ -19,6 +19,11 @@ operation timeline between commits.
   conversation-window change, so you watch the agent's edits land as it works.
   (Backed by `tree.json` / `file.json` host routes; traversal- and
   symlink-guarded.)
+- **Browse before any modification** — the worktree reads the live workspace,
+  so it works with zero ops. While a session is still blank (no conversation
+  yet) the `details` column is hidden, so a ThreadTrail button in the sidebar
+  footer opens the same wide worktree review for the current session — read
+  the code before the agent has changed anything.
 - **Anchored notes** — select code in the viewer; a floating composer saves a
   note pinned to the line range (with the selected snippet). Notes are marked
   in the gutter, listed under the file, and click-to-jump back to the line
