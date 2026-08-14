@@ -125,6 +125,26 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** Clean (trash can) icon as inline SVG — same hand-drawn style. */
+    function cleanIcon(size) {
+      return createElement(
+        "svg",
+        {
+          viewBox: "0 0 16 16",
+          width: size,
+          height: size,
+          "aria-hidden": true,
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: "1.5",
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        },
+        createElement("path", { d: "M6.5 2.5h3M2.5 4h11M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4" }),
+        createElement("path", { d: "M6.5 7v4.5M9.5 7v4.5" }),
+      );
+    }
+
     // ── syntax highlighting (compact, dependency-free) ─────────────────────
 
     function escRe(s) {
@@ -551,8 +571,8 @@ window.__ModuleLoader__.load({
           { className: "ddb-header-actions" },
           createElement(
             "button",
-            { type: "button", className: "ddb-iconbtn ddb-cleanbtn", title: "Clean the op list — safe after a commit (the workspace state is in git)", onClick: doClean },
-            "clean",
+            { type: "button", className: "ddb-iconbtn", title: "Clean the op list — safe after a commit (the workspace state is in git)", onClick: doClean },
+            cleanIcon(14),
           ),
           createElement(
             "button",
@@ -1213,7 +1233,6 @@ window.__ModuleLoader__.load({
 .ddb-header-actions{display:flex;gap:4px}
 .ddb-iconbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ddb-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
-.ddb-iconbtn.ddb-cleanbtn{width:auto;padding:0 8px;font-size:11px}
 .ddb-tabs{display:flex;gap:4px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,#2a2a2a)}
 .ddb-tab{background:none;border:none;color:inherit;opacity:.6;cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px}
 .ddb-tab:hover{opacity:.9}
