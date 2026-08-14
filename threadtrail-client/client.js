@@ -85,6 +85,46 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Refresh (circular arrow) icon as inline SVG — same hand-drawn style as
+     * expandIcon, so every panel icon button shares one look.
+     */
+    function refreshIcon(size) {
+      return createElement(
+        "svg",
+        {
+          viewBox: "0 0 16 16",
+          width: size,
+          height: size,
+          "aria-hidden": true,
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: "1.5",
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        },
+        createElement("path", { d: "M13 8a5 5 0 1 1-1.5-3.5M13.5 2v3.5h-3.5" }),
+      );
+    }
+
+    /** Close (×) icon as inline SVG — same hand-drawn style as the others. */
+    function closeIcon(size) {
+      return createElement(
+        "svg",
+        {
+          viewBox: "0 0 16 16",
+          width: size,
+          height: size,
+          "aria-hidden": true,
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: "1.5",
+          strokeLinecap: "round",
+        },
+        createElement("path", { d: "M4 4l8 8M12 4l-8 8" }),
+      );
+    }
+
     // ── syntax highlighting (compact, dependency-free) ─────────────────────
 
     function escRe(s) {
@@ -300,7 +340,7 @@ window.__ModuleLoader__.load({
         async openFile(sessionId, rel) {
           const s = this.get();
           // Re-opening the file that is already on screen (the realtime
-          // refresh, or a manual ↻) must NOT blank the viewer: keep the
+          // refresh, or a manual reload) must NOT blank the viewer: keep the
           // current content visible until the fresh copy arrives, so the
           // reader's place is not lost. Only the first open shows a loader.
           const refresh = s.openPath === rel && s.fileData !== null;
@@ -511,7 +551,7 @@ window.__ModuleLoader__.load({
           { className: "ddb-header-actions" },
           createElement(
             "button",
-            { type: "button", className: "ddb-cleanbtn", title: "Clean the op list — safe after a commit (the workspace state is in git)", onClick: doClean },
+            { type: "button", className: "ddb-iconbtn ddb-cleanbtn", title: "Clean the op list — safe after a commit (the workspace state is in git)", onClick: doClean },
             "clean",
           ),
           createElement(
@@ -521,8 +561,8 @@ window.__ModuleLoader__.load({
           ),
           createElement(
             "button",
-            { type: "button", className: "ddb-iconbtn", onClick: () => fetchDigest() },
-            "↻",
+            { type: "button", className: "ddb-iconbtn", title: "Refresh", onClick: () => fetchDigest() },
+            refreshIcon(14),
           ),
         ),
       );
@@ -721,7 +761,7 @@ window.__ModuleLoader__.load({
         { className: "ddb-tree-head" },
         createElement("span", { className: "ddb-tree-count" },
           wt.tree ? `${wt.tree.files.length} files` : "…"),
-        createElement("button", { type: "button", className: "ddb-iconbtn", onClick: () => wt.sessionId && worktreeStore.fetchTree(wt.sessionId) }, "↻"),
+        createElement("button", { type: "button", className: "ddb-iconbtn", title: "Refresh file list", onClick: () => wt.sessionId && worktreeStore.fetchTree(wt.sessionId) }, refreshIcon(14)),
       );
       if (wt.treeError) {
         const noWs = /no workspace/i.test(wt.treeError);
@@ -770,7 +810,7 @@ window.__ModuleLoader__.load({
         wt.fileRefreshing
           ? createElement("span", { className: "ddb-refreshing" }, "refreshing…")
           : null,
-        createElement("button", { type: "button", className: "ddb-iconbtn", onClick: () => worktreeStore.openFile(sessionId, wt.openPath) }, "↻"),
+        createElement("button", { type: "button", className: "ddb-iconbtn", title: "Reload file", onClick: () => worktreeStore.openFile(sessionId, wt.openPath) }, refreshIcon(14)),
       );
 
       let content;
@@ -1055,7 +1095,7 @@ window.__ModuleLoader__.load({
           createElement("div", { className: "ddb-overlay-head" },
             createElement("span", { className: "ddb-overlay-title" }, "ThreadTrail — worktree review"),
             createElement("span", { className: "ddb-overlay-session" }, sessionId),
-            createElement("button", { type: "button", className: "ddb-iconbtn", title: "close", onClick: () => worktreeStore.closeOverlay() }, "✕"),
+            createElement("button", { type: "button", className: "ddb-iconbtn", title: "close", onClick: () => worktreeStore.closeOverlay() }, closeIcon(14)),
           ),
           createElement(
             "div",
@@ -1171,10 +1211,9 @@ window.__ModuleLoader__.load({
 .ddb-title-main{font-weight:600;letter-spacing:.02em}
 .ddb-title-sub{font-size:10px;opacity:.55}
 .ddb-header-actions{display:flex;gap:4px}
-.ddb-iconbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1}
+.ddb-iconbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ddb-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
-.ddb-cleanbtn{background:none;border:1px solid var(--dsw-alias-border-l2,#333);color:inherit;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;line-height:1}
-.ddb-cleanbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.ddb-iconbtn.ddb-cleanbtn{width:auto;padding:0 8px;font-size:11px}
 .ddb-tabs{display:flex;gap:4px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1,#2a2a2a)}
 .ddb-tab{background:none;border:none;color:inherit;opacity:.6;cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px}
 .ddb-tab:hover{opacity:.9}
