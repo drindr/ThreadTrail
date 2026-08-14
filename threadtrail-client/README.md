@@ -45,7 +45,11 @@ operation timeline between commits.
   (non-destructive; files never touched by captured history are not copied).
 - **Live-ish updates** — the panel refetches the digest (and the open file)
   whenever the conversation window changes (turn boundaries, tool results)
-  plus a manual refresh button.
+  plus a manual refresh button. Refreshes are **non-disruptive**: the current
+  file content stays visible while the fresh copy loads (a subtle
+  "refreshing…" indicator in the viewer head), the scroll position is kept,
+  and a failed refresh shows a note above the last loaded content instead of
+  dropping the viewer.
 
 ## How it loads
 

@@ -262,6 +262,7 @@ window.__ModuleLoader__.load({
         fileData: null,
         fileError: null,
         fileLoading: false,
+        fileRefreshing: false,
         overlayOpen: false,
         overlayDismissed: false,
         selection: null, // {startLine, endLine, snippet, x, y}
@@ -282,7 +283,7 @@ window.__ModuleLoader__.load({
         },
         reset(sessionId) {
           fetchSeq++;
-          this.set({ sessionId, tree: null, treeError: null, openPath: null, fileData: null, fileError: null, selection: null, noteDraft: "", saving: false, overlayOpen: false, overlayDismissed: false });
+          this.set({ sessionId, tree: null, treeError: null, openPath: null, fileData: null, fileError: null, selection: null, noteDraft: "", saving: false, fileLoading: false, fileRefreshing: false, overlayOpen: false, overlayDismissed: false });
           this.fetchTree(sessionId);
         },
         async fetchTree(sessionId) {
@@ -297,18 +298,32 @@ window.__ModuleLoader__.load({
           }
         },
         async openFile(sessionId, rel) {
+          const s = this.get();
+          // Re-opening the file that is already on screen (the realtime
+          // refresh, or a manual ↻) must NOT blank the viewer: keep the
+          // current content visible until the fresh copy arrives, so the
+          // reader's place is not lost. Only the first open shows a loader.
+          const refresh = s.openPath === rel && s.fileData !== null;
           const seq = ++fetchSeq;
-          this.set({ openPath: rel, fileData: null, fileError: null, fileLoading: true, selection: null, noteDraft: "" });
+          this.set(
+            refresh
+              ? { fileRefreshing: true }
+              : { openPath: rel, fileData: null, fileError: null, fileLoading: true, fileRefreshing: false, selection: null, noteDraft: "" },
+          );
           try {
             const d = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/file.json?path=${encodeURIComponent(rel)}`);
             if (seq !== fetchSeq) return;
-            this.set({ fileData: d, fileError: null, fileLoading: false });
+            this.set(refresh ? { fileData: d, fileError: null, fileRefreshing: false } : { fileData: d, fileError: null, fileLoading: false, fileRefreshing: false });
           } catch (e) {
-            if (seq === fetchSeq) this.set({ fileError: e.message, fileLoading: false });
+            if (seq === fetchSeq) {
+              // On a refresh failure keep the last content and surface the
+              // error instead of dropping the viewer.
+              this.set(refresh ? { fileError: e.message, fileRefreshing: false } : { fileError: e.message, fileLoading: false, fileRefreshing: false });
+            }
           }
         },
         closeFile() {
-          this.set({ openPath: null, fileData: null, fileError: null, selection: null, noteDraft: "" });
+          this.set({ openPath: null, fileData: null, fileError: null, selection: null, noteDraft: "", fileRefreshing: false });
         },
         /** Realtime: re-read the open file when the agent works. */
         refreshOpen(sessionId) {
@@ -752,15 +767,19 @@ window.__ModuleLoader__.load({
         { className: "ddb-viewer-head" },
         createElement("button", { type: "button", className: "ddb-back", onClick: () => worktreeStore.closeFile() }, "← files"),
         createElement("span", { className: "ddb-viewer-path", title: wt.openPath }, wt.openPath),
+        wt.fileRefreshing
+          ? createElement("span", { className: "ddb-refreshing" }, "refreshing…")
+          : null,
         createElement("button", { type: "button", className: "ddb-iconbtn", onClick: () => worktreeStore.openFile(sessionId, wt.openPath) }, "↻"),
       );
 
       let content;
-      if (wt.fileError) {
-        content = createElement("div", { className: "ddb-note ddb-error" }, wt.fileError);
-      } else if (!wt.fileData) {
-        content = createElement("div", { className: "ddb-note" }, wt.fileLoading ? "Loading file…" : "Open a file to review it.");
+      if (!wt.fileData) {
+        content = wt.fileError
+          ? createElement("div", { className: "ddb-note ddb-error" }, wt.fileError)
+          : createElement("div", { className: "ddb-note" }, wt.fileLoading ? "Loading file…" : "Open a file to review it.");
       } else {
+        // Keep showing the last content when a realtime refresh failed.
         content = createElement(FileContent, { wt, sessionId, onOpenOp });
       }
 
@@ -779,6 +798,37 @@ window.__ModuleLoader__.load({
       const codeRef = useRef(null);
       const [noteBox, setNoteBox] = useState(null); // {startLine, endLine, snippet, x, y}
       const { fileData } = wt;
+
+      // Preserve the reader's place across realtime refreshes: when a refresh
+      // starts (fileRefreshing true) the current content is still on screen,
+      // so save the scroll offset of the scrolling container; when the fresh
+      // content lands (fileRefreshing false) restore it. The viewer stays
+      // mounted throughout — only the first open ever shows a loader.
+      const viewportRef = useRef(null);
+      const savedScrollRef = useRef(0);
+      useEffect(() => {
+        if (wt.fileRefreshing) {
+          let vp = viewportRef.current;
+          if (!vp) {
+            let el = codeRef.current;
+            while (el && el !== document.body) {
+              const ov = getComputedStyle(el).overflowY;
+              if (ov === "auto" || ov === "scroll") {
+                vp = el;
+                break;
+              }
+              el = el.parentElement;
+            }
+          }
+          viewportRef.current = vp || null;
+          savedScrollRef.current = vp ? vp.scrollTop : 0;
+        } else if (viewportRef.current) {
+          const vp = viewportRef.current;
+          const max = vp.scrollHeight - vp.clientHeight;
+          vp.scrollTop = Math.max(0, Math.min(savedScrollRef.current, max));
+          viewportRef.current = null;
+        }
+      }, [wt.fileRefreshing]);
 
       const ops = fileData.ops || [];
       const notes = fileData.notes || [];
@@ -869,6 +919,7 @@ window.__ModuleLoader__.load({
       const meta = [];
       if (fileData.truncated) meta.push("(truncated)");
       if (changed.latest) meta.push(`highlighted: lines changed by ${changed.latest.opId}`);
+      if (wt.fileError) meta.push(`refresh failed: ${wt.fileError} — showing last loaded content`);
 
       // per-file op history (code -> conversation)
       const opRows = ops.map((entry) => {
@@ -1175,6 +1226,7 @@ window.__ModuleLoader__.load({
 .ddb-tree-item-size{opacity:.4;font-size:10px;white-space:nowrap}
 .ddb-viewer-head{display:flex;align-items:center;gap:6px;margin-bottom:6px}
 .ddb-viewer-path{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;flex:1;min-width:0}
+.ddb-refreshing{font-size:10px;opacity:.5;font-style:italic;white-space:nowrap}
 .ddb-filemeta{font-size:10px;opacity:.55;margin-bottom:6px}
 .ddb-code{font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;border:1px solid var(--dsw-alias-border-l1,#2a2a2a);border-radius:8px;overflow:hidden;margin-bottom:8px}
 .ddb-cline{display:flex;white-space:pre-wrap;word-break:break-all}
