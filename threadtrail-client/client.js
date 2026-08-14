@@ -62,6 +62,29 @@ window.__ModuleLoader__.load({
       return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
     }
 
+    /**
+     * Expand (four-corners) icon as inline SVG. Replaces the U+26F6 "⛶"
+     * glyph, which most system fonts do not include and renders as a tofu
+     * box on many platforms — SVG renders identically everywhere.
+     */
+    function expandIcon(size) {
+      return createElement(
+        "svg",
+        {
+          viewBox: "0 0 16 16",
+          width: size,
+          height: size,
+          "aria-hidden": true,
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: "1.5",
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        },
+        createElement("path", { d: "M2 2h4M2 2v4M10 2h4M14 2v4M2 10v4M2 14h4M10 14h4M14 14v-4" }),
+      );
+    }
+
     // ── syntax highlighting (compact, dependency-free) ─────────────────────
 
     function escRe(s) {
@@ -356,7 +379,7 @@ window.__ModuleLoader__.load({
 
       // The details column is narrow (ui-layout caps it at 520px), so entering
       // the worktree tab auto-opens the wide overlay review — unless the user
-      // dismissed it for this session (they can reopen via ⛶ or the banner).
+      // dismissed it for this session (they can reopen via the expand icon or the banner).
       const selectTab = (next) => {
         setTab(next);
         if (next === "worktree" && !wt.overlayOpen && !wt.overlayDismissed) {
@@ -464,7 +487,7 @@ window.__ModuleLoader__.load({
           createElement(
             "button",
             { type: "button", className: "ddb-iconbtn", title: "Expand worktree", onClick: () => worktreeStore.openOverlay(sessionId) },
-            "⛶",
+            expandIcon(14),
           ),
           createElement(
             "button",
@@ -640,7 +663,7 @@ window.__ModuleLoader__.load({
         ? createElement(
             "button",
             { type: "button", className: "ddb-widen", onClick: () => worktreeStore.openOverlay(sessionId) },
-            "⛶ Open wide review (this column is capped at 520px)",
+            createElement(Fragment, null, expandIcon(12), " Open wide review (this column is capped at 520px)"),
           )
         : null;
 
@@ -992,7 +1015,7 @@ window.__ModuleLoader__.load({
           title: "ThreadTrail — browse the workspace",
           onClick: () => worktreeStore.openOverlay(currentId),
         },
-        createElement("span", { className: "ddb-footbtn-icon" }, "⛶"),
+        createElement("span", { className: "ddb-footbtn-icon" }, expandIcon(14)),
         props.wide ? createElement("span", { className: "ddb-footbtn-label" }, "ThreadTrail") : null,
       );
     }
@@ -1175,7 +1198,7 @@ window.__ModuleLoader__.load({
 .ddb-footbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;min-width:32px;padding:0 8px;background:none;border:none;color:inherit;cursor:pointer;border-radius:8px;font-size:12px;flex:none}
 .ddb-footbtn:hover{background:var(--dsw-alias-interactive-bg-hover,#ffffff14)}
 .ddb-footbtn-wide{width:100%;justify-content:flex-start;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#333)}
-.ddb-footbtn-icon{font-size:14px;line-height:1}
+.ddb-footbtn-icon{font-size:14px;line-height:1;display:inline-flex}
 .ddb-footbtn-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 body[data-ds-dark-theme] .ddb-tok-k{color:#c792ea}
 body[data-ds-dark-theme] .ddb-tok-s{color:#7ec699}
