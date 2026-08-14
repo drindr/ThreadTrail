@@ -27,7 +27,12 @@ pnpm typecheck          # tsc --noEmit in both packages
   `turn/end` records the agent's edits for that turn), content-hash based for
   correctness on coarse-granularity filesystems. Ignored: `.git`,
   `node_modules`, `.threadtrail`, `target`, `dist`, `build`, `venv`, …; files
-  > 20 MB excluded.
+  > 20 MB excluded. In **git workspaces** (a `.git` directory present) the
+  repository's `.gitignore` files and `.git/info/exclude` are honored too —
+  ignored files are neither captured nor listed in the worktree browser
+  (basename, anchored `/`, directory-only `dir/`, `**` and `!` negation
+  patterns supported, deepest `.gitignore` wins; the global excludes file is
+  not read).
 - **Stable identity** = `(sessionId, opId)`; ops reference the session event
   seq that bracketed them (`atSeq`), so the op log and the conversation log
   stay addressable together.
@@ -133,6 +138,14 @@ half.
   baseline, so edits from *before* the plugin was active (including this
   session) are not in the log. The worktree browser itself is unaffected —
   it reads the live workspace, so it works before the first baseline too.
+- Git-ignore filtering is only active when the workspace root is itself a git
+  repository (`.git` present at the root — matching the HEAD-detection
+  scope). A file that becomes git-ignored mid-session is reported as removed
+  at the next scan and stops being traced; `.gitignore` edits are picked up at
+  the next capture scan, and the worktree browser re-checks ignore files on
+  disk. Note the re-inclusion rule is git's: a file under an excluded
+  directory cannot be re-included with `!` unless the directory is
+  re-included first (use `dir/*` + `!dir/file` instead of `dir/`).
 - Commits reset the op list (auto-detected HEAD move, or the manual clean
   button). Any HEAD movement — commit, branch switch, reset — counts, since
   in every case the workspace state is a git state. Pre-commit ops are gone
@@ -151,6 +164,6 @@ half.
 ## Tests
 
 ```sh
-pnpm test    # server: node --test on the TS sources (13 tests); client: bundle harness
+pnpm test    # server: node --test on the TS sources (27 tests); client: bundle harness
 pnpm typecheck
 ```

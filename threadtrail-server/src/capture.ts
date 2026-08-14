@@ -26,7 +26,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import { computeDiff, computeRanges } from './diff.ts';
-import { gitHead } from './git.ts';
+import { GitIgnore, gitHead } from './git.ts';
 import type {
   Digest,
   DigestOpSummary,
@@ -85,8 +85,17 @@ interface HeadRecord {
   lastCleanTrigger: string | null;
 }
 
+/** Options for `listFiles`. */
+export interface ListFilesOptions {
+  /** Per-entry predicate (workspace-relative, '/' separators): when it
+   * returns true the entry — file or directory — is skipped. Used to drop
+   * git-ignored paths in git workspaces. */
+  ignore?: (rel: string) => boolean;
+}
+
 /** Recursively list files under `root`, skipping ignored directories/files. */
-export async function listFiles(root: string): Promise<string[]> {
+export async function listFiles(root: string, opts: ListFilesOptions = {}): Promise<string[]> {
+  const { ignore } = opts;
   const out: string[] = [];
   const stack = [root];
   while (stack.length) {
@@ -100,6 +109,7 @@ export async function listFiles(root: string): Promise<string[]> {
     for (const entry of entries) {
       if (IGNORE_NAMES.has(entry.name)) continue;
       const abs = path.join(dir, entry.name);
+      if (ignore && ignore(normalizeRel(path.relative(root, abs)))) continue;
       if (entry.isDirectory()) {
         stack.push(abs);
       } else if (entry.isFile()) {
@@ -201,6 +211,11 @@ export class SessionCapture {
   lastCleanSha: string | null = null;
   lastCleanTime: number | null = null;
   lastCleanTrigger: string | null = null;
+  // git-ignore matcher for the workspace (null until first used). Built fresh
+  // at every capture scan; the worktree browser reuses it and only reloads
+  // when a known ignore file changed on disk.
+  gitIgnore: GitIgnore | null = null;
+  gitIgnoreCwd: string | null = null;
 
   constructor(store: CaptureStore, sessionId: string, cwd: string | null) {
     this.store = store;
@@ -318,6 +333,23 @@ export class SessionCapture {
     }
   }
 
+  /**
+   * The git-ignore matcher for the workspace, or null when it is not a git
+   * repo. `forceReload` (used at capture scans) re-reads every .gitignore
+   * file; the worktree browser reuses the cached matcher and only reloads
+   * when a known ignore file changed on disk.
+   */
+  private async gitIgnoreMatcher(forceReload: boolean): Promise<GitIgnore | null> {
+    if (!this.cwd) return null;
+    if (forceReload || !this.gitIgnore || this.gitIgnoreCwd !== this.cwd) {
+      this.gitIgnore = await GitIgnore.load(this.cwd, { skipDirs: IGNORE_NAMES });
+      this.gitIgnoreCwd = this.cwd;
+    } else {
+      await this.gitIgnore.refreshIfChanged();
+    }
+    return this.gitIgnore;
+  }
+
   /** Persist the git-HEAD / last-reset bookkeeping (best-effort). */
   async saveHead(): Promise<void> {
     try {
@@ -390,7 +422,10 @@ export class SessionCapture {
     if (!this.cwd) return null;
     await this.store.init(); // idempotent; safe even if activation did not await
     await this.load();
-    const files = await listFiles(this.cwd);
+    const gi = await this.gitIgnoreMatcher(true);
+    const files = await listFiles(this.cwd, {
+      ignore: gi && !gi.isEmpty ? (rel) => gi.ignores(rel) : undefined,
+    });
     const next = new Map<string, ManifestEntry>();
     const pending: string[] = [];
     for (const abs of files) {
@@ -599,7 +634,10 @@ export class SessionCapture {
   async tree(): Promise<{ root: string; truncated: boolean; files: TreeEntry[] } | null> {
     if (!this.cwd) return null;
     const MAX_FILES = 3000;
-    const files = await listFiles(this.cwd);
+    const gi = await this.gitIgnoreMatcher(false);
+    const files = await listFiles(this.cwd, {
+      ignore: gi && !gi.isEmpty ? (rel) => gi.ignores(rel) : undefined,
+    });
     const out: TreeEntry[] = [];
     for (const abs of files.slice(0, MAX_FILES)) {
       try {
