@@ -86,7 +86,10 @@ pnpm test       # node --test test/ (module-loader contract harness)
 
 ## Install (web profile)
 
+Build first (the profile receives the built bundle):
+
 ```sh
+pnpm build   # esbuild → dist/client.js
 dsh plugin --profile web add file:/path/to/threadtrail-client
 ```
 

@@ -65,7 +65,10 @@ pnpm test       # node --test on the TS test sources (capture engine + route han
 
 ## Install (web profile)
 
+Build first (the profile receives `dist/`):
+
 ```sh
+pnpm build   # tsc → dist/
 dsh plugin --profile web add file:/path/to/threadtrail-server
 ```
 

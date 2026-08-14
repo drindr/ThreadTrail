@@ -73,8 +73,16 @@ pnpm typecheck          # tsc --noEmit in both packages
 Already done for this machine's web profile; to reproduce elsewhere:
 
 ```sh
-# from the repo root — build first (the profiles receive built artifacts)
-pnpm install && pnpm build
+# 1. prerequisites: Node.js >= 22 (native TS support), pnpm, and dsh on PATH
+
+# 2. clone + install + build the workspace (build produces the dist/ artifacts
+#    the profiles receive)
+git clone <this-repo> && cd ThreadTrail
+pnpm install
+pnpm build
+
+# 3. install both plugins into the web profile (dsh plugin forwards to pnpm
+#    inside the profile directory; file: deps are copied)
 dsh plugin --profile web add file:$PWD/threadtrail-server file:$PWD/threadtrail-client
 ```
 
@@ -88,12 +96,22 @@ Then add to `$DSH_HOME/profiles/web/cordis.patch.yml`:
       name: threadtrail-client
 ```
 
+Restart `dsh web` and hard-refresh the browser tab (see "Activate" below).
+
+### Headless profile (optional smoke-test bed)
+
+```sh
+dsh plugin --profile headless add file:$PWD/threadtrail-server
+```
+
+and add `threadtrail-server` to `$DSH_HOME/profiles/headless/cordis.patch.yml`.
+
+### After editing the source
+
 > pnpm `file:` deps are **copied**, not linked: after editing the source, run
-> `pnpm build` again and re-sync the copies (`dsh plugin --profile web add
-> file:... --force`, or `cp` the package's `package.json` + `dist/` into
-> `$DSH_HOME/profiles/web/node_modules/<pkg>/`). The headless profile on this
-> machine carries `threadtrail-server` as a smoke-test bed — re-sync it the
-> same way.
+> `pnpm build` again and re-sync the copies
+> (`dsh plugin --profile web add file:... --force`, or `cp` the package's
+> `package.json` + `dist/` into `$DSH_HOME/profiles/web/node_modules/<pkg>/`).
 
 ## Activate (requires restart)
 
