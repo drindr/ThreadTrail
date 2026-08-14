@@ -8,22 +8,16 @@
  * event seqs).
  *
  * Storage layout under `$DSH_HOME/threadtrail/`:
- *   blobs/<sha256>          content-addressed file contents (deduped across
- *                           sessions and ops)
- *   sessions/<sessionId>.jsonl   append-only op records (one JSON object per
- *                           line; the full diff text lives here)
- *
- * An op record has a stable identity `op-<n>` per session and carries:
- *   atSeq          the session event seq that triggered the capture
- *   turn/step      the agent turn the change belongs to (null for manual)
- *   userMessageSeq the seq of the human prompt that drove the turn
- *   assistantSeqs  seqs of the assistant messages inside that turn
- *   files[]        per-file { path, sha, prevSha, deleted, added, removed,
- *                  diff } where diff is a line-marker list
+ *   blobs/<sha256>              content-addressed file contents (deduped)
+ *   sessions/<sessionId>.jsonl  append-only op records (one JSON object per
+ *                               line; the full diff text lives here)
+ *   sessions/<sessionId>.head.json  git HEAD / last-reset bookkeeping
+ *   notes/<sessionId>.jsonl     anchored notes
  *
  * Capture happens at turn boundaries (the "between commits" granularity):
  * a scan at `turn/start` records manual edits made since the last scan, and
- * a scan at `turn/end` records the agent's edits for that turn.
+ * a scan at `turn/end` records the agent's edits for that turn. A moved git
+ * HEAD (a commit) clears the op list automatically — the state is in git.
  */
 
 import { createHash } from 'node:crypto';
@@ -31,21 +25,37 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
+import { computeDiff, computeRanges } from './diff.ts';
+import { gitHead } from './git.ts';
+import type {
+  Digest,
+  DigestOpSummary,
+  FileChange,
+  FileOpsEntry,
+  NoteRecord,
+  OpRecord,
+  ReadFileResult,
+  ResetOptions,
+  RewindFileState,
+  ScanOptions,
+  TreeEntry,
+} from './types.ts';
 
 const require = createRequire(import.meta.url);
 /** Canonical harness home helper from the platform when resolvable (profile
  * installs), else the identical inline logic (~/.dsh fallback). */
-let dshHomePath;
+let dshHomePath: (...segments: string[]) => string;
 try {
-  dshHomePath = require('@deepseek-ai/dsh-home-paths').dshHomePath;
+  dshHomePath = require('@deepseek-ai/dsh-home-paths').dshHomePath as typeof dshHomePath;
 } catch {
-  dshHomePath = (...segments) => {
+  dshHomePath = (...segments: string[]) => {
     const env = process.env.DSH_HOME;
     const home = env && env.trim() ? env : path.join(os.homedir(), '.dsh');
     return path.join(home, ...segments);
   };
 }
 
+/** Directory/file names excluded from capture. */
 export const IGNORE_NAMES = new Set([
   '.git', 'node_modules', '.threadtrail', 'target', 'dist', 'build', 'out',
   '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.DS_Store',
@@ -55,209 +65,33 @@ export const IGNORE_NAMES = new Set([
 /** Files larger than this are excluded from capture (hashed and diffed). */
 export const MAX_CAPTURE_BYTES = 20 * 1024 * 1024;
 
-/** Line counts above this skip the LCS diff and emit a whole-file replace. */
-export const LCS_MAX_LINES = 800;
-
-export function sha256(text) {
+/** SHA-256 hex of a UTF-8 string. */
+export function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/**
- * Resolve the current git HEAD commit sha of a workspace without spawning
- * git: reads `.git/HEAD` (handles both a `.git` directory and a worktree /
- * submodule `.git` file pointing at a gitdir), follows symbolic refs, and
- * falls back to packed-refs.
- * @returns {Promise<string|null>} the HEAD sha (lowercase, 40 hex), or null
- *   when the directory is not inside a git repository.
- */
-export async function gitHead(cwd) {
-  const gitPath = path.join(cwd, '.git');
-  let gitDir = gitPath;
-  try {
-    const st = await fs.stat(gitPath);
-    if (st.isFile()) {
-      const content = await fs.readFile(gitPath, 'utf8');
-      const m = /^gitdir:\s*(.+)$/m.exec(content);
-      if (!m) return null;
-      gitDir = path.resolve(cwd, m[1].trim());
-    }
-  } catch {
-    return null; // no .git at all — not a git workspace
-  }
-  let head;
-  try {
-    head = (await fs.readFile(path.join(gitDir, 'HEAD'), 'utf8')).trim();
-  } catch {
-    return null;
-  }
-  const ref = /^ref:\s*(\S+)$/.exec(head);
-  if (ref) {
-    try {
-      head = (await fs.readFile(path.join(gitDir, ref[1]), 'utf8')).trim();
-    } catch {
-      // the ref is packed — look it up in packed-refs
-      try {
-        const packed = await fs.readFile(path.join(gitDir, 'packed-refs'), 'utf8');
-        let found = null;
-        for (const line of packed.split('\n')) {
-          const pm = /^([0-9a-f]{40,})\s+(\S+)$/.exec(line.trim());
-          if (pm && pm[2] === ref[1]) {
-            found = pm[1];
-            break;
-          }
-        }
-        head = found ?? '';
-      } catch {
-        head = '';
-      }
-    }
-  }
-  return /^[0-9a-f]{40}$/.test(head) ? head : null;
+/** Per-path state recorded at a scan (hash plus filesystem metadata). */
+interface ManifestEntry {
+  sha: string | null;
+  size: bigint;
+  mtimeNs: bigint;
 }
 
-/**
- * Compute a line diff between two texts.
- * @returns {{ added: number, removed: number, lines: Array<{t: ' '|'+'|'-', text: string}> }}
- */
-export function computeDiff(oldText, newText) {
-  // Split on newlines and drop the artifact empty element from a trailing
-  // newline — a trailing '\n' is a property of the file, not an extra line.
-  const a = oldText === '' ? [] : oldText.split('\n');
-  const b = newText === '' ? [] : newText.split('\n');
-  if (a.length && a[a.length - 1] === '') a.pop();
-  if (b.length && b[b.length - 1] === '') b.pop();
-  let prefix = 0;
-  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
-  let suffix = 0;
-  while (
-    suffix < a.length - prefix &&
-    suffix < b.length - prefix &&
-    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
-  ) suffix++;
-  const midA = a.slice(prefix, a.length - suffix);
-  const midB = b.slice(prefix, b.length - suffix);
-
-  const lines = [];
-  for (let i = 0; i < prefix; i++) lines.push({ t: ' ', text: a[i] });
-  if (midA.length === 0) {
-    for (const x of midB) lines.push({ t: '+', text: x });
-  } else if (midB.length === 0) {
-    for (const x of midA) lines.push({ t: '-', text: x });
-  } else if (midA.length <= LCS_MAX_LINES && midB.length <= LCS_MAX_LINES) {
-    for (const { t, text } of lcsDiff(midA, midB)) lines.push({ t, text });
-  } else {
-    for (const x of midA) lines.push({ t: '-', text: x });
-    for (const x of midB) lines.push({ t: '+', text: x });
-  }
-  for (let i = a.length - suffix; i < a.length; i++) lines.push({ t: ' ', text: a[i] });
-
-  let added = 0;
-  let removed = 0;
-  for (const l of lines) {
-    if (l.t === '+') added++;
-    else if (l.t === '-') removed++;
-  }
-  return { added, removed, lines };
-}
-
-/**
- * Compute old/new line ranges covered by a diff's changed runs (unified-diff
- * hunk semantics): each contiguous run of `+`/`-` lines becomes one range on
- * each side. Used to anchor code to conversation ("which lines did this op
- * touch") and to highlight changed lines in the worktree viewer.
- * @param {Array<{t: ' '|'+'|'-', text: string}>} lines
- * @returns {{ oldRanges: Array<{start: number, end: number}>, newRanges: Array<{start: number, end: number}> }}
- */
-export function computeRanges(lines) {
-  const oldRanges = [];
-  const newRanges = [];
-  let oldLine = 1;
-  let newLine = 1;
-  let runOldStart = null;
-  let runNewStart = null;
-  let oldTouched = false;
-  let newTouched = false;
-  let inRun = false;
-  const closeRun = () => {
-    if (!inRun) return;
-    if (oldTouched) oldRanges.push({ start: runOldStart, end: oldLine - 1 });
-    if (newTouched) newRanges.push({ start: runNewStart, end: newLine - 1 });
-    inRun = false;
-  };
-  for (const l of lines) {
-    if (l.t === ' ') {
-      closeRun();
-      oldLine++;
-      newLine++;
-    } else {
-      if (!inRun) {
-        inRun = true;
-        runOldStart = oldLine;
-        runNewStart = newLine;
-        oldTouched = false;
-        newTouched = false;
-      }
-      if (l.t === '-') {
-        oldTouched = true;
-        oldLine++;
-      } else {
-        newTouched = true;
-        newLine++;
-      }
-    }
-  }
-  closeRun();
-  return { oldRanges, newRanges };
-}
-
-/** LCS diff of two line arrays (n*m DP over Int32 rows, memory-bounded by caller). */
-export function lcsDiff(a, b) {
-  const n = a.length;
-  const m = b.length;
-  const rows = [new Int32Array(m + 1)];
-  for (let i = 1; i <= n; i++) {
-    const prev = rows[i - 1];
-    const cur = new Int32Array(m + 1);
-    const ai = a[i - 1];
-    for (let j = 1; j <= m; j++) {
-      cur[j] = ai === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
-    }
-    rows.push(cur);
-  }
-  const out = [];
-  let i = n;
-  let j = m;
-  while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) {
-      out.push({ t: ' ', text: a[i - 1] });
-      i--;
-      j--;
-    } else if (rows[i - 1][j] >= rows[i][j - 1]) {
-      out.push({ t: '-', text: a[i - 1] });
-      i--;
-    } else {
-      out.push({ t: '+', text: b[j - 1] });
-      j--;
-    }
-  }
-  while (i > 0) {
-    out.push({ t: '-', text: a[i - 1] });
-    i--;
-  }
-  while (j > 0) {
-    out.push({ t: '+', text: b[j - 1] });
-    j--;
-  }
-  return out.reverse();
+/** The persisted git-HEAD / last-reset sidecar record. */
+interface HeadRecord {
+  head: string | null;
+  lastCleanSha: string | null;
+  lastCleanTime: number | null;
+  lastCleanTrigger: string | null;
 }
 
 /** Recursively list files under `root`, skipping ignored directories/files. */
-export async function listFiles(root) {
-  const out = [];
+export async function listFiles(root: string): Promise<string[]> {
+  const out: string[] = [];
   const stack = [root];
   while (stack.length) {
-    const dir = stack.pop();
-    let entries;
+    const dir = stack.pop()!;
+    let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
@@ -277,7 +111,7 @@ export async function listFiles(root) {
 }
 
 /** Hash every listed path into the manifest entries (bounded concurrency). */
-async function hashBatch(paths, manifest, sc) {
+async function hashBatch(paths: string[], manifest: Map<string, ManifestEntry>, sc: SessionCapture): Promise<void> {
   let i = 0;
   const limit = Math.min(16, paths.length);
   const workers = Array.from({ length: limit }, async () => {
@@ -285,7 +119,8 @@ async function hashBatch(paths, manifest, sc) {
       const abs = paths[i++];
       try {
         const content = await fs.readFile(abs, 'utf8');
-        manifest.get(abs).sha = await sc.writeBlob(content);
+        const entry = manifest.get(abs);
+        if (entry) entry.sha = await sc.writeBlob(content);
       } catch {
         // unreadable file — leave sha null; it will not diff
       }
@@ -295,21 +130,26 @@ async function hashBatch(paths, manifest, sc) {
 }
 
 export class CaptureStore {
+  root: string;
+  blobsDir: string;
+  sessionsDir: string;
+  notesDir: string;
+  sessions = new Map<string, SessionCapture>();
+  private _init: Promise<void> | undefined;
+
   /**
-   * @param {{ root: string }} opts - `root` is the threadtrail data directory
-   *   (defaults to `$DSH_HOME/threadtrail`).
+   * @param opts - `root` is the threadtrail data directory (defaults to
+   *   `$DSH_HOME/threadtrail`).
    */
-  constructor({ root } = {}) {
+  constructor({ root }: { root?: string } = {}) {
     // Canonical harness home (DSH_HOME, or ~/.dsh) — never the bare home dir.
     this.root = root || dshHomePath('threadtrail');
     this.blobsDir = path.join(this.root, 'blobs');
     this.sessionsDir = path.join(this.root, 'sessions');
     this.notesDir = path.join(this.root, 'notes');
-    /** @type {Map<string, SessionCapture>} */
-    this.sessions = new Map();
   }
 
-  async init() {
+  async init(): Promise<void> {
     this._init ??= (async () => {
       await fs.mkdir(this.blobsDir, { recursive: true });
       await fs.mkdir(this.sessionsDir, { recursive: true });
@@ -318,12 +158,12 @@ export class CaptureStore {
     return this._init;
   }
 
-  get(sessionId) {
+  get(sessionId: string): SessionCapture | undefined {
     return this.sessions.get(sessionId);
   }
 
   /** Attach a session (called on `session/created` or first touch). */
-  getOrCreate(sessionId, cwd) {
+  getOrCreate(sessionId: string, cwd: string | null): SessionCapture {
     let sc = this.sessions.get(sessionId);
     if (!sc) {
       sc = new SessionCapture(this, sessionId, cwd);
@@ -335,50 +175,52 @@ export class CaptureStore {
   }
 
   /** Drop in-memory state for a disposed session (the jsonl stays on disk). */
-  dispose(sessionId) {
+  dispose(sessionId: string): void {
     this.sessions.delete(sessionId);
   }
 }
 
-class SessionCapture {
-  constructor(store, sessionId, cwd) {
+export class SessionCapture {
+  store: CaptureStore;
+  sessionId: string;
+  cwd: string | null;
+  manifest = new Map<string, ManifestEntry>();
+  ops: OpRecord[] = [];
+  opCounter = 0;
+  lastUserSeq: number | null = null;
+  /** turn -> assistant/message seqs */
+  assistantSeqs = new Map<number, number[]>();
+  notes: NoteRecord[] = [];
+  noteCounter = 0;
+  notesLoaded = false;
+  loaded = false;
+  baselined = false;
+  // git HEAD bookkeeping: the last HEAD seen and the last op-list reset
+  // (persisted so restarts do not re-trigger a reset for the same commit).
+  lastHead: string | null = null;
+  lastCleanSha: string | null = null;
+  lastCleanTime: number | null = null;
+  lastCleanTrigger: string | null = null;
+
+  constructor(store: CaptureStore, sessionId: string, cwd: string | null) {
     this.store = store;
     this.sessionId = sessionId;
     this.cwd = cwd || null;
-    /** @type {Map<string, {sha: string|null, size: bigint, mtimeNs: bigint}>} */
-    this.manifest = new Map();
-    /** @type {Array<object>} */
-    this.ops = [];
-    this.opCounter = 0;
-    this.lastUserSeq = null;
-    /** @type {Map<number, number[]>} turn -> assistant/message seqs */
-    this.assistantSeqs = new Map();
-    this.notes = [];
-    this.noteCounter = 0;
-    this.notesLoaded = false;
-    this.loaded = false;
-    this.baselined = false;
-    // git HEAD bookkeeping: the last HEAD seen and the last op-list reset
-    // (persisted so restarts do not re-trigger a reset for the same commit).
-    this.lastHead = null;
-    this.lastCleanSha = null;
-    this.lastCleanTime = null;
-    this.lastCleanTrigger = null;
   }
 
-  jsonlPath() {
+  jsonlPath(): string {
     return path.join(this.store.sessionsDir, `${this.sessionId}.jsonl`);
   }
 
-  headPath() {
+  headPath(): string {
     return path.join(this.store.sessionsDir, `${this.sessionId}.head.json`);
   }
 
-  notesPath() {
+  notesPath(): string {
     return path.join(this.store.notesDir, `${this.sessionId}.jsonl`);
   }
 
-  async loadNotes() {
+  async loadNotes(): Promise<void> {
     if (this.notesLoaded) return;
     this.notesLoaded = true;
     try {
@@ -386,7 +228,7 @@ class SessionCapture {
       for (const line of text.split('\n')) {
         if (!line.trim()) continue;
         try {
-          const rec = JSON.parse(line);
+          const rec = JSON.parse(line) as NoteRecord;
           this.notes.push(rec);
           const n = Number(rec.id.replace(/^n-/, ''));
           if (Number.isInteger(n) && n > this.noteCounter) this.noteCounter = n;
@@ -401,17 +243,17 @@ class SessionCapture {
 
   /**
    * Add an anchored note on a file's line range (the "notation" feature).
-   * @returns {Promise<object>} the stored note record.
+   * @returns the stored note record.
    */
-  async addNote({ path: rel, startLine, endLine, snippet, note }) {
+  async addNote(opts: { path: string; startLine: number; endLine: number; snippet?: string; note: string }): Promise<NoteRecord> {
     await this.loadNotes();
-    const record = {
+    const record: NoteRecord = {
       id: `n-${++this.noteCounter}`,
-      path: normalizeRel(rel),
-      startLine,
-      endLine,
-      snippet: snippet ?? '',
-      note,
+      path: normalizeRel(opts.path),
+      startLine: opts.startLine,
+      endLine: opts.endLine,
+      snippet: opts.snippet ?? '',
+      note: opts.note,
       time: Date.now(),
     };
     this.notes.push(record);
@@ -425,7 +267,7 @@ class SessionCapture {
   }
 
   /** Remove a note by id. */
-  async deleteNote(id) {
+  async deleteNote(id: string): Promise<boolean> {
     await this.loadNotes();
     const before = this.notes.length;
     this.notes = this.notes.filter((n) => n.id !== id);
@@ -440,13 +282,13 @@ class SessionCapture {
   }
 
   /** Notes anchored on a path, newest first. */
-  async notesFor(rel) {
+  async notesFor(rel: string): Promise<NoteRecord[]> {
     await this.loadNotes();
     const norm = normalizeRel(rel);
     return this.notes.filter((n) => n.path === norm).reverse();
   }
 
-  async load() {
+  async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
     try {
@@ -454,7 +296,7 @@ class SessionCapture {
       for (const line of text.split('\n')) {
         if (!line.trim()) continue;
         try {
-          const rec = JSON.parse(line);
+          const rec = JSON.parse(line) as OpRecord;
           this.ops.push(rec);
           const n = Number(rec.id.replace(/^op-/, ''));
           if (Number.isInteger(n) && n > this.opCounter) this.opCounter = n;
@@ -466,7 +308,7 @@ class SessionCapture {
       // no log yet
     }
     try {
-      const rec = JSON.parse(await fs.readFile(this.headPath(), 'utf8'));
+      const rec = JSON.parse(await fs.readFile(this.headPath(), 'utf8')) as HeadRecord;
       this.lastHead = rec.head ?? null;
       this.lastCleanSha = rec.lastCleanSha ?? null;
       this.lastCleanTime = rec.lastCleanTime ?? null;
@@ -477,7 +319,7 @@ class SessionCapture {
   }
 
   /** Persist the git-HEAD / last-reset bookkeeping (best-effort). */
-  async saveHead() {
+  async saveHead(): Promise<void> {
     try {
       await fs.writeFile(
         this.headPath(),
@@ -486,7 +328,7 @@ class SessionCapture {
           lastCleanSha: this.lastCleanSha ?? null,
           lastCleanTime: this.lastCleanTime ?? null,
           lastCleanTrigger: this.lastCleanTrigger ?? null,
-        }),
+        } satisfies HeadRecord),
         'utf8',
       );
     } catch {
@@ -494,7 +336,7 @@ class SessionCapture {
     }
   }
 
-  async writeBlob(content) {
+  async writeBlob(content: string): Promise<string> {
     const sha = sha256(content);
     try {
       await fs.access(path.join(this.store.blobsDir, sha));
@@ -504,7 +346,7 @@ class SessionCapture {
     return sha;
   }
 
-  async readBlob(sha) {
+  async readBlob(sha: string | null): Promise<string> {
     if (!sha) return '';
     try {
       return await fs.readFile(path.join(this.store.blobsDir, sha), 'utf8');
@@ -520,9 +362,8 @@ class SessionCapture {
    * re-establishes the baseline against the current workspace, so subsequent
    * edits are recorded as ops starting from op-1. Notes and conversation
    * attribution state (lastUserSeq, per-turn assistant seqs) are kept.
-   * @param {{ trigger: 'commit'|'manual', sha?: string|null }} opts
    */
-  async resetOps({ trigger, sha = null } = {}) {
+  async resetOps({ trigger, sha = null }: ResetOptions = { trigger: 'manual' }): Promise<void> {
     await this.load();
     this.ops = [];
     this.opCounter = 0;
@@ -542,17 +383,18 @@ class SessionCapture {
   /**
    * Scan the workspace and record an op for whatever changed since the last
    * scan. The first scan on a fresh session only establishes the baseline.
-   * @returns {Promise<object|null>} the recorded op, or null when nothing changed.
+   * @returns the recorded op, or null when nothing changed.
    */
-  async scan({ trigger, atSeq, turn, userMessageSeq, assistantSeqs = [] }) {
+  async scan(opts: ScanOptions): Promise<OpRecord | null> {
+    const { trigger, atSeq, turn, userMessageSeq, assistantSeqs = [] } = opts;
     if (!this.cwd) return null;
     await this.store.init(); // idempotent; safe even if activation did not await
     await this.load();
     const files = await listFiles(this.cwd);
-    const next = new Map();
-    const pending = [];
+    const next = new Map<string, ManifestEntry>();
+    const pending: string[] = [];
     for (const abs of files) {
-      let st;
+      let st: import('node:fs').BigIntStats;
       try {
         st = await fs.stat(abs, { bigint: true });
       } catch {
@@ -587,14 +429,14 @@ class SessionCapture {
     }
 
     // changed or added files (content hash differs from the previous scan)
-    const changed = [];
+    const changed: Array<{ abs: string; entry: ManifestEntry; prev: ManifestEntry | undefined }> = [];
     for (const [abs, entry] of next) {
       const prev = this.manifest.get(abs);
       if (prev && prev.sha === entry.sha) continue; // genuinely unchanged
       changed.push({ abs, entry, prev });
     }
     // removed files
-    const removed = [];
+    const removed: Array<{ abs: string; prev: ManifestEntry }> = [];
     for (const [abs, prev] of this.manifest) {
       if (!next.has(abs)) removed.push({ abs, prev });
     }
@@ -604,9 +446,9 @@ class SessionCapture {
       return null;
     }
 
-    const filesRec = [];
+    const filesRec: FileChange[] = [];
     for (const { abs, entry, prev } of changed) {
-      let content;
+      let content: string;
       try {
         content = await fs.readFile(abs, 'utf8');
       } catch {
@@ -636,10 +478,12 @@ class SessionCapture {
         added: 0,
         removed: null,
         diff: null,
+        oldRanges: [],
+        newRanges: [],
       });
     }
 
-    const op = {
+    const op: OpRecord = {
       id: `op-${++this.opCounter}`,
       sessionId: this.sessionId,
       atSeq,
@@ -667,25 +511,23 @@ class SessionCapture {
    * directory. Delta snapshot semantics: every file whose last recorded op
    * <= opId (and not deleted) is written with its content at that point;
    * files never touched by captured history are not copied.
-   * @returns {Promise<{target: string, files: Array<{path: string, state: 'written'|'deleted'|'unchanged'}>}>}
    */
-  async rewind(opId, targetDir) {
+  async rewind(opId: string, targetDir: string): Promise<{ target: string; files: RewindFileState[] }> {
     await this.load();
     const idx = this.ops.findIndex((o) => o.id === opId);
     if (idx < 0) {
       const err = new Error(`op not found: ${opId}`);
-      err.code = 'THREADTRAIL_OP_NOT_FOUND';
+      (err as Error & { code: string }).code = 'THREADTRAIL_OP_NOT_FOUND';
       throw err;
     }
-    /** @type {Map<string, {sha: string|null, deleted: boolean}>} */
-    const state = new Map();
+    const state = new Map<string, { sha: string | null; deleted: boolean }>();
     for (let i = 0; i <= idx; i++) {
       for (const f of this.ops[i].files) {
         state.set(f.path, { sha: f.sha, deleted: f.deleted });
       }
     }
     await fs.mkdir(targetDir, { recursive: true });
-    const files = [];
+    const files: RewindFileState[] = [];
     for (const [rel, s] of state) {
       if (s.deleted) {
         files.push({ path: rel, state: 'deleted' });
@@ -701,8 +543,8 @@ class SessionCapture {
   }
 
   /** Compact digest for the panel: op summaries + path -> ops index. */
-  digest() {
-    const ops = this.ops.map((o) => ({
+  digest(): Digest {
+    const ops: DigestOpSummary[] = this.ops.map((o) => ({
       id: o.id,
       atSeq: o.atSeq,
       time: o.time,
@@ -718,14 +560,13 @@ class SessionCapture {
         deleted: f.deleted,
       })),
     }));
-    /** @type {Record<string, string[]>} */
-    const fileIndex = {};
+    const fileIndex: Record<string, string[]> = {};
     for (const o of this.ops) {
       for (const f of o.files) {
         (fileIndex[f.path] ??= []).push(o.id);
       }
     }
-    const turnIndex = {};
+    const turnIndex: Digest['turnIndex'] = {};
     for (const o of this.ops) {
       if (o.turn == null) continue;
       const t = (turnIndex[o.turn] ??= { userMessageSeq: o.userMessageSeq, opIds: [], assistantSeqs: o.assistantSeqs });
@@ -741,12 +582,12 @@ class SessionCapture {
       turnIndex,
       gitHead: this.lastHead ?? null,
       lastClean: this.lastCleanTrigger
-        ? { sha: this.lastCleanSha ?? null, time: this.lastCleanTime, trigger: this.lastCleanTrigger }
+        ? { sha: this.lastCleanSha ?? null, time: this.lastCleanTime ?? 0, trigger: this.lastCleanTrigger }
         : null,
     };
   }
 
-  async opRecord(opId) {
+  async opRecord(opId: string): Promise<OpRecord | null> {
     await this.load();
     return this.ops.find((o) => o.id === opId) ?? null;
   }
@@ -754,13 +595,12 @@ class SessionCapture {
   /**
    * List the current workspace files (ignoring capture-ignored dirs), for the
    * worktree browser. Capped to keep the payload UI-scale.
-   * @returns {Promise<{root: string, truncated: boolean, files: Array<{path: string, size: number}>} | null>}
    */
-  async tree() {
+  async tree(): Promise<{ root: string; truncated: boolean; files: TreeEntry[] } | null> {
     if (!this.cwd) return null;
     const MAX_FILES = 3000;
     const files = await listFiles(this.cwd);
-    const out = [];
+    const out: TreeEntry[] = [];
     for (const abs of files.slice(0, MAX_FILES)) {
       try {
         const st = await fs.stat(abs, { bigint: true });
@@ -775,9 +615,9 @@ class SessionCapture {
   /**
    * Resolve a relative workspace path, refusing escapes (lexical and via
    * symlinks). Missing files still resolve (the caller decides what to do).
-   * @returns {Promise<string|null>} absolute path, or null when escaping/invalid.
+   * @returns absolute path, or null when escaping/invalid.
    */
-  async resolveWorkspacePath(rel) {
+  async resolveWorkspacePath(rel: string): Promise<string | null> {
     if (!this.cwd) return null;
     if (typeof rel !== 'string' || rel.length === 0 || rel.includes('\0')) return null;
     const abs = path.resolve(this.cwd, rel);
@@ -796,14 +636,13 @@ class SessionCapture {
   /**
    * Read a workspace file's current content, guarded against path traversal
    * (lexical and symlink escapes refused; missing files -> THREADTRAIL_NO_FILE).
-   * @returns {Promise<{path: string, content: string, truncated: boolean, lines: number}>}
    * @throws {Error} with `code` THREADTRAIL_NO_CWD / THREADTRAIL_PATH_ESCAPE / THREADTRAIL_NO_FILE
    */
-  async readFile(rel) {
+  async readFile(rel: string): Promise<ReadFileResult> {
     if (!this.cwd) throw errWith('session has no workspace', 'THREADTRAIL_NO_CWD');
     const abs = await this.resolveWorkspacePath(rel);
     if (!abs) throw errWith('path escapes the workspace', 'THREADTRAIL_PATH_ESCAPE');
-    let content;
+    let content: string;
     try {
       content = await fs.readFile(abs, 'utf8');
     } catch {
@@ -823,11 +662,10 @@ class SessionCapture {
   /**
    * Every op that touched a path, with its line ranges — the worktree
    * viewer's "code -> conversation" anchor data.
-   * @returns {Array<{opId, turn, kind, time, userMessageSeq, files: Array}>}
    */
-  fileOps(rel) {
+  fileOps(rel: string): FileOpsEntry[] {
     const norm = normalizeRel(rel);
-    const out = [];
+    const out: FileOpsEntry[] = [];
     for (const o of this.ops) {
       const files = o.files.filter((f) => normalizeRel(f.path) === norm);
       if (!files.length) continue;
@@ -851,13 +689,13 @@ class SessionCapture {
 }
 
 /** Build an Error carrying a stable machine code. */
-function errWith(message, code) {
-  const e = new Error(message);
+export function errWith(message: string, code: string): Error & { code: string } {
+  const e = new Error(message) as Error & { code: string };
   e.code = code;
   return e;
 }
 
 /** Normalize a relative path for comparisons (forward slashes, no ./). */
-function normalizeRel(rel) {
+export function normalizeRel(rel: string): string {
   return String(rel).replace(/\\/g, '/').replace(/^\.\//, '');
 }

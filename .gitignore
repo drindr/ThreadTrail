@@ -3,6 +3,9 @@ node_modules/
 *.log
 *.zst
 
+# TypeScript build output
+**/dist/
+
 # ThreadTrail runtime artifacts (rewind materializations inside the workspace)
 .threadtrail/
 

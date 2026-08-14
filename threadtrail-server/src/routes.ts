@@ -1,17 +1,32 @@
 /**
  * HTTP routes for the ThreadTrail panel. Mounted on the web server under the
- * `/threadtrail/` prefix (the web-server exact/prefix table matches before the SPA
- * fallback). GETs for reads; POST/DELETE only for the anchored-notes API.
- * Rewind is non-destructive (materializes into `<cwd>/.threadtrail/rewinds/…`).
+ * `/threadtrail/` prefix (the web-server exact/prefix table matches before the
+ * SPA fallback). GETs for reads; POST/DELETE only for the anchored-notes API
+ * and the manual clean. Rewind is non-destructive (materializes into
+ * `<cwd>/.threadtrail/rewinds/…`).
  */
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
-import { promptPreview } from './messages.js';
+import type { CaptureStore, SessionCapture } from './capture.ts';
+import { promptPreview } from './messages.ts';
+import type { SessionEvent, SessionsLike } from './messages.ts';
+import type { DigestOpSummary, OpRecord } from './types.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 const OP_ID_RE = /^op-\d+$/;
 
-export function sendJson(res, status, body) {
+/** The web-server face this plugin needs (the host webserver satisfies it). */
+export interface WebServerLike {
+  register(opts: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): void;
+}
+
+/** The session-store face the routes need for cold-attach. */
+export interface SessionStoreLike extends SessionsLike {
+  get(sessionId: string): { header?: { cwd?: string | null }; events?: SessionEvent[] } | undefined;
+}
+
+export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -21,7 +36,7 @@ export function sendJson(res, status, body) {
   res.end(text);
 }
 
-export function sendText(res, status, text) {
+export function sendText(res: ServerResponse, status: number, text: string): void {
   res.writeHead(status, {
     'content-type': 'text/plain; charset=utf-8',
     'content-length': Buffer.byteLength(text),
@@ -32,21 +47,21 @@ export function sendText(res, status, text) {
 const MAX_BODY_BYTES = 64 * 1024;
 
 /** Read and JSON-parse a request body (size-capped). */
-async function readBody(req) {
-  const chunks = [];
+async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
     if (size > MAX_BODY_BYTES) {
       const e = new Error('request body too large');
-      e.code = 'THREADTRAIL_BODY_TOO_LARGE';
+      (e as Error & { code: string }).code = 'THREADTRAIL_BODY_TOO_LARGE';
       throw e;
     }
-    chunks.push(chunk);
+    chunks.push(chunk as Buffer);
   }
   const text = Buffer.concat(chunks).toString('utf8');
   if (!text.trim()) return {};
-  return JSON.parse(text);
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 /**
@@ -55,25 +70,24 @@ async function readBody(req) {
  * NOTE: the prefix must NOT end with a slash — the webserver matcher tests
  * `pathname.startsWith(prefix + "/")`, so "/threadtrail/" would demand a double
  * slash and never match.
- * @param {import('@deepseek-ai/dsh-host-webserver').WebServer} webServer
- * @param {{ store: import('./capture.js').CaptureStore, sessions: import('@deepseek-ai/dsh-session').SessionStore }} deps
  */
-export function registerRoutes(webServer, { store, sessions }) {
+export function registerRoutes(webServer: WebServerLike, deps: { store: CaptureStore; sessions: SessionStoreLike | undefined }): void {
   webServer.register({
     kind: 'prefix',
     path: '/threadtrail',
     handler: async (req, res) => {
       try {
-        await handle(req, res, { store, sessions });
+        await handle(req, res, deps);
       } catch (err) {
-        sendJson(res, 500, { error: String(err?.message ?? err) });
+        sendJson(res, 500, { error: String(err instanceof Error ? err.message : err) });
       }
     },
   });
 }
 
-async function handle(req, res, { store, sessions }) {
-  const url = new URL(req.url, 'http://localhost');
+async function handle(req: IncomingMessage, res: ServerResponse, deps: { store: CaptureStore; sessions: SessionStoreLike | undefined }): Promise<void> {
+  const { store, sessions } = deps;
+  const url = new URL(req.url ?? '/', 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean); // ['threadtrail', ...]
 
   if (parts.length === 2 && parts[1] === 'status.json' && req.method === 'GET') {
@@ -95,14 +109,7 @@ async function handle(req, res, { store, sessions }) {
     return;
   }
 
-  const sc = store.get(sessionId);
-  if (!sc) {
-    // A request for a session we have not seen yet: attach it if the session
-    // store knows it (cold session) — capture then starts on its next events.
-    const session = sessions?.get?.(sessionId);
-    store.getOrCreate(sessionId, session?.header?.cwd ?? null);
-  }
-  const cap = store.get(sessionId);
+  const cap = resolveCapture(store, sessions, sessionId);
 
   // ── notes: POST /threadtrail/<sid>/notes, DELETE /threadtrail/<sid>/notes/<id> ──
   if (parts[2] === 'notes' && parts.length === 3 && req.method === 'POST') {
@@ -112,15 +119,16 @@ async function handle(req, res, { store, sessions }) {
         sendJson(res, 400, { error: 'session has no workspace' });
         return;
       }
-      const abs = await cap.resolveWorkspacePath(body?.path);
+      const rel = String(body.path ?? '');
+      const abs = await cap.resolveWorkspacePath(rel);
       if (!abs) {
         sendJson(res, 400, { error: 'path escapes the workspace' });
         return;
       }
-      const startLine = Number(body?.startLine);
-      const endLine = Number(body?.endLine);
-      const note = typeof body?.note === 'string' ? body.note.trim() : '';
-      const snippet = typeof body?.snippet === 'string' ? body.snippet.slice(0, 1000) : '';
+      const startLine = Number(body.startLine);
+      const endLine = Number(body.endLine);
+      const note = typeof body.note === 'string' ? body.note.trim() : '';
+      const snippet = typeof body.snippet === 'string' ? body.snippet.slice(0, 1000) : '';
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
         sendJson(res, 400, { error: 'invalid line range' });
         return;
@@ -129,10 +137,11 @@ async function handle(req, res, { store, sessions }) {
         sendJson(res, 400, { error: 'note must be 1..2000 characters' });
         return;
       }
-      const record = await cap.addNote({ path: String(body.path), startLine, endLine, snippet, note });
+      const record = await cap.addNote({ path: rel, startLine, endLine, snippet, note });
       sendJson(res, 200, record);
     } catch (err) {
-      sendJson(res, err?.code === 'THREADTRAIL_BODY_TOO_LARGE' ? 413 : 400, { error: err?.message ?? 'bad request' });
+      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
+      sendJson(res, code === 'THREADTRAIL_BODY_TOO_LARGE' ? 413 : 400, { error: err instanceof Error ? err.message : 'bad request' });
     }
     return;
   }
@@ -153,7 +162,7 @@ async function handle(req, res, { store, sessions }) {
       ops: cap.ops.length,
       gitHead: cap.lastHead ?? null,
       lastClean: cap.lastCleanTrigger
-        ? { sha: cap.lastCleanSha ?? null, time: cap.lastCleanTime, trigger: cap.lastCleanTrigger }
+        ? { sha: cap.lastCleanSha ?? null, time: cap.lastCleanTime ?? 0, trigger: cap.lastCleanTrigger }
         : null,
     });
     return;
@@ -170,7 +179,7 @@ async function handle(req, res, { store, sessions }) {
     // Enrich each op with a short preview of the prompt that drove it
     // (code -> conversation at a glance).
     for (const op of digest.ops) {
-      op.prompt = await promptPreview(sessions, sessionId, op.userMessageSeq);
+      (op as DigestOpSummary & { prompt?: string | null }).prompt = await promptPreview(sessions, sessionId, op.userMessageSeq);
     }
     sendJson(res, 200, digest);
     return;
@@ -183,7 +192,7 @@ async function handle(req, res, { store, sessions }) {
       sendJson(res, 404, { error: `op not found: ${opId}` });
       return;
     }
-    record.prompt = await promptPreview(sessions, sessionId, record.userMessageSeq);
+    (record as OpRecord & { prompt?: string | null }).prompt = await promptPreview(sessions, sessionId, record.userMessageSeq);
     sendJson(res, 200, record);
     return;
   }
@@ -199,7 +208,8 @@ async function handle(req, res, { store, sessions }) {
       const result = await cap.rewind(opId, target);
       sendJson(res, 200, result);
     } catch (err) {
-      sendJson(res, err.code === 'THREADTRAIL_OP_NOT_FOUND' ? 404 : 500, { error: err.message });
+      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
+      sendJson(res, code === 'THREADTRAIL_OP_NOT_FOUND' ? 404 : 500, { error: err instanceof Error ? err.message : String(err) });
     }
     return;
   }
@@ -229,12 +239,24 @@ async function handle(req, res, { store, sessions }) {
       const notes = await cap.notesFor(rel);
       sendJson(res, 200, { ...data, ops, notes });
     } catch (err) {
-      const status =
-        err.code === 'THREADTRAIL_PATH_ESCAPE' ? 400 : err.code === 'THREADTRAIL_NO_FILE' ? 404 : 400;
-      sendJson(res, status, { error: err.message });
+      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
+      const status = code === 'THREADTRAIL_PATH_ESCAPE' ? 400 : code === 'THREADTRAIL_NO_FILE' ? 404 : 400;
+      sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
     }
     return;
   }
 
   sendJson(res, 404, { error: 'not found' });
+}
+
+/**
+ * Resolve the capture for a session, cold-attaching it when the session store
+ * knows the session (capture then starts on its next events). Always returns a
+ * capture — `getOrCreate` never fails.
+ */
+function resolveCapture(store: CaptureStore, sessions: SessionStoreLike | undefined, sessionId: string): SessionCapture {
+  const existing = store.get(sessionId);
+  if (existing) return existing;
+  const session = sessions?.get(sessionId);
+  return store.getOrCreate(sessionId, session?.header?.cwd ?? null);
 }

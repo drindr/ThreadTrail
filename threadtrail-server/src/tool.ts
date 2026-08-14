@@ -1,13 +1,15 @@
 /**
- * The agent-facing `threadtrail` tool: lets the model itself draw on the captured
- * history — "what did I change in this session", "why was this line written",
- * "rewind to that point" — the ThreadTrail idea that agents pick up the context
- * behind the code they are touching.
+ * The agent-facing `threadtrail` tool: lets the model itself draw on the
+ * captured history — "what did I change in this session", "why was this line
+ * written", "rewind to that point" — the ThreadTrail idea that agents pick up
+ * the context behind the code they are touching.
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import path from 'node:path';
-import { promptPreview } from './messages.js';
+import type { CaptureStore } from './capture.ts';
+import { promptPreview } from './messages.ts';
+import type { SessionsLike } from './messages.ts';
 
 const ACTIONS = [
   ['status', 'Report capture status for the current session (or all sessions).'],
@@ -17,7 +19,7 @@ const ACTIONS = [
   ['rewind', 'Materialize the workspace state right after an op into a fresh directory under <cwd>/.threadtrail/rewinds (non-destructive).'],
 ].map(([name, description]) => ({ name, description }));
 
-export function threadtrailTool({ store, sessions }) {
+export function threadtrailTool({ store, sessions }: { store: CaptureStore; sessions: SessionsLike | undefined }) {
   return defineTool({
     name: 'threadtrail',
     description:
@@ -50,21 +52,21 @@ export function threadtrailTool({ store, sessions }) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      render: (_args: unknown, value: string) => [{ type: 'text', text: value }],
     },
-    async execute(args, exec) {
+    async execute(args: Record<string, unknown>, exec: { agent?: { sessionId?: string } } | undefined) {
       try {
-        const sessionId = args.sessionId || exec?.agent?.sessionId || null;
+        const sessionId = (args.sessionId as string | undefined) || exec?.agent?.sessionId || null;
         return await run(args, sessionId, store, sessions);
       } catch (err) {
-        return `threadtrail error: ${err && err.message ? err.message : String(err)}`;
+        return `threadtrail error: ${err instanceof Error ? err.message : String(err)}`;
       }
     },
   });
 }
 
-async function run(args, sessionId, store, sessions) {
-  const action = args.action;
+async function run(args: Record<string, unknown>, sessionId: string | null, store: CaptureStore, sessions: SessionsLike | undefined): Promise<string> {
+  const action = args.action as string;
   if (action === 'status') {
     const rows = [];
     for (const [id, sc] of store.sessions) {
@@ -74,12 +76,7 @@ async function run(args, sessionId, store, sessions) {
   }
 
   if (!sessionId) return 'No session id available (run from a session, or pass sessionId).';
-  const sc = store.get(sessionId);
-  if (!sc) {
-    store.getOrCreate(sessionId, null);
-  }
-  const cap = store.get(sessionId);
-  if (!cap) return 'Session not tracked.';
+  const cap = store.getOrCreate(sessionId, null);
   await cap.load();
 
   if (action === 'list') {
@@ -114,11 +111,11 @@ async function run(args, sessionId, store, sessions) {
   }
 
   if (action === 'why') {
-    const opId = args.opId;
-    const turn = args.turn;
+    const opId = args.opId as string | undefined;
+    const turn = args.turn as number | undefined;
     let op = null;
-    if (opId) op = cap.ops.find((o) => o.id === opId);
-    else if (turn != null) op = cap.ops.filter((o) => o.turn === turn).at(-1);
+    if (opId) op = cap.ops.find((o) => o.id === opId) ?? null;
+    else if (turn != null) op = cap.ops.filter((o) => o.turn === turn).at(-1) ?? null;
     if (!op) {
       const ids = cap.ops.map((o) => o.id).slice(-20).join(', ');
       return `Op not found. Known op ids (last 20): ${ids || '(none yet)'}.`;
@@ -126,8 +123,8 @@ async function run(args, sessionId, store, sessions) {
     const prompt = await promptPreview(sessions, sessionId, op.userMessageSeq);
     const files = op.files.map((f) => {
       if (f.deleted) return `  - ${f.path} (deleted, was sha ${f.prevSha?.slice(0, 8) ?? '?'})`;
-      const diffText = (f.diff || []).slice(0, 60).map((l) => `${l.t}${l.text}`).join('\n');
-      const more = (f.diff?.length ?? 0) > 60 ? `\n  … (${f.diff.length - 60} more diff lines)` : '';
+      const diffText = (f.diff ?? []).slice(0, 60).map((l) => `${l.t}${l.text}`).join('\n');
+      const more = (f.diff?.length ?? 0) > 60 ? `\n  … (${(f.diff?.length ?? 0) - 60} more diff lines)` : '';
       return `  - ${f.path} +${f.added}/-${f.removed}\n${diffText}${more}`;
     }).join('\n');
     return [
@@ -139,10 +136,10 @@ async function run(args, sessionId, store, sessions) {
   }
 
   if (action === 'rewind') {
-    const opId = args.opId;
+    const opId = args.opId as string | undefined;
     if (!opId) return 'action=rewind requires opId.';
     if (!cap.cwd) return 'Session has no workspace to rewind into.';
-    const target = pathJoinSafe(cap.cwd, `.threadtrail/rewinds/${opId}-${Date.now()}`);
+    const target = path.join(cap.cwd, `.threadtrail/rewinds/${opId}-${Date.now()}`);
     const result = await cap.rewind(opId, target);
     return `Materialized workspace state after ${opId} into ${result.target}\n` +
       result.files.map((f) => `  ${f.state === 'deleted' ? '(absent)' : 'written'} ${f.path}`).join('\n') +
@@ -150,9 +147,4 @@ async function run(args, sessionId, store, sessions) {
   }
 
   return `Unknown action "${action}". Actions: ${ACTIONS.map((a) => a.name).join(', ')}.`;
-}
-
-function pathJoinSafe(base, rel) {
-  // rel is internally constructed (never user-controlled paths join here directly)
-  return path.join(base, rel);
 }

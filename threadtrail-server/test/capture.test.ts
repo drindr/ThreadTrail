@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CaptureStore, computeDiff, computeRanges, gitHead, sha256 } from '../capture.js';
+import { CaptureStore, sha256 } from '../src/capture.ts';
+import { computeDiff, computeRanges } from '../src/diff.ts';
+import { gitHead } from '../src/git.ts';
 
-async function tempDir() {
+async function tempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-test-'));
 }
 
-async function write(rel, content) {
+async function write(rel: string, content: string): Promise<void> {
   await fs.mkdir(path.dirname(rel), { recursive: true });
   await fs.writeFile(rel, content, 'utf8');
 }
@@ -81,24 +83,28 @@ test('captures edits between turn boundaries and attributes them', async () => {
   const paths = op.files.map((f) => f.path).sort();
   assert.deepEqual(paths, ['a.txt', 'b.txt']);
   const a = op.files.find((f) => f.path === 'a.txt');
+  assert.ok(a);
   assert.equal(a.added, 1);
   assert.equal(a.removed, 0);
   // line ranges: 'hello\nworld\n' -> 'hello\nworld\nchanged\n' appends line 3
   assert.deepEqual(a.newRanges, [{ start: 3, end: 3 }]);
   assert.deepEqual(a.oldRanges, []);
   const b = op.files.find((f) => f.path === 'b.txt');
+  assert.ok(b);
   assert.equal(b.prevSha, null);
   assert.deepEqual(b.newRanges, [{ start: 1, end: 1 }]);
 
   // second turn: agent edits b.txt; a.txt untouched
   await write(path.join(ws, 'b.txt'), 'new file\nedited\n');
   const op2 = await sc.scan({ trigger: 'turn/end', atSeq: 9, turn: 2, userMessageSeq: 7, assistantSeqs: [8] });
+  assert.ok(op2);
   assert.equal(op2.id, 'op-2');
   assert.deepEqual(op2.files.map((f) => f.path), ['b.txt']);
   assert.deepEqual(op2.files[0].newRanges, [{ start: 2, end: 2 }]);
 
   // worktree browser: tree + readFile + per-file op history
   const tree = await sc.tree();
+  assert.ok(tree);
   assert.deepEqual(tree.files.map((f) => f.path).sort(), ['a.txt', 'b.txt']);
   const file = await sc.readFile('a.txt');
   assert.equal(file.content, 'hello\nworld\nchanged\n');
@@ -137,6 +143,7 @@ test('worktree browsing works before any modification (session attached, no scan
   assert.equal(sc.ops.length, 0);
 
   const tree = await sc.tree();
+  assert.ok(tree);
   assert.deepEqual(tree.files.map((f) => f.path).sort(), ['a.txt', 'src/main.js']);
   const file = await sc.readFile('src/main.js');
   assert.equal(file.content, 'export const x = 1;\n');
@@ -230,6 +237,7 @@ test('a moved git HEAD (a commit) automatically cleans the op list', async () =>
   // post-commit edits start a fresh op list from op-1
   await write(path.join(ws, 'a.txt'), 'v3\n');
   const op2 = await sc.scan({ trigger: 'turn/end', atSeq: 13, turn: 2, userMessageSeq: 11, assistantSeqs: [12] });
+  assert.ok(op2);
   assert.equal(op2.id, 'op-1');
   assert.equal(sc.ops.length, 1);
   await fs.rm(root, { recursive: true, force: true });
@@ -294,7 +302,7 @@ test('rewind materializes the state right after an op (including later edits and
   await sc.scan({ trigger: 'turn/end', atSeq: 6, turn: 2, userMessageSeq: 5, assistantSeqs: [] });
 
   const target = path.join(root, 'rewind1');
-  const r1 = await sc.rewind(op1.id, target);
+  const r1 = await sc.rewind(op1!.id, target);
   assert.equal(await fs.readFile(path.join(target, 'keep.txt'), 'utf8'), 'v1\n');
   assert.equal(await fs.readFile(path.join(target, 'gone.txt'), 'utf8'), 'temp\n');
 
@@ -344,6 +352,7 @@ test('ignores node_modules/.git and captures deletes', async () => {
   const op = await sc.scan({ trigger: 'turn/end', atSeq: 3, turn: 1, userMessageSeq: 2, assistantSeqs: [] });
   assert.ok(op);
   const s = op.files.find((f) => f.path === 'src.js');
+  assert.ok(s);
   assert.equal(s.added, 1);
   assert.equal(s.removed, 1);
   assert.ok(!op.files.some((f) => f.path.includes('node_modules') || f.path.includes('.git')));
@@ -354,7 +363,6 @@ test('content-addressed blobs dedupe identical content', async () => {
   const root = await tempDir();
   const store = new CaptureStore({ root: path.join(root, 'data') });
   await store.init();
-  const sha1 = await store.getOrCreate('s', null) && null;
   const content = 'identical\n';
   const sc = store.getOrCreate('sess-1', null);
   const s1 = await sc.writeBlob(content);

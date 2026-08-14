@@ -6,7 +6,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js",
+    "./client": "./dist/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -21,7 +21,17 @@
   },
   "files": [
     "index.js",
-    "client.js"
+    "dist"
   ],
-  "license": "MIT"
+  "scripts": {
+    "build": "node build/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
 }

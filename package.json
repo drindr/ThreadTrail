@@ -1,0 +1,12 @@
+{
+  "name": "threadtrail",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ThreadTrail for DeepSeek Harness — a between-commits operation log, realtime worktree review, and clean-on-commit, as a pnpm TypeScript workspace.",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

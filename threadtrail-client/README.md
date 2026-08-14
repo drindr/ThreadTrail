@@ -53,12 +53,36 @@ operation timeline between commits.
 
 ## How it loads
 
-This file is a classic-script client bundle registered through the module
-loader, exactly like the shipped client plugins — zero build step. The
-factory's `require` resolves `react` and the dsh packages through the loader's
-module table at runtime. `exports["./client"]` points at this file, and the
-package's `dsh.client` declaration tells the modules node half to serve it
-under `/plugins/threadtrail-client/client.js`.
+TypeScript/TSX in `src/` is bundled by **esbuild** (`build/build.mjs`) into a
+classic-script module-loader bundle at `dist/client.js`. The bundle is wrapped
+in the loader contract:
+
+```js
+window.__ModuleLoader__.load({
+  id: "threadtrail-client",
+  factory: function (require) { /* bundled modules */ return ThreadTrailClient; },
+});
+```
+
+Nesting the bundle inside the factory is what makes its external
+`require("react")` calls resolve through the loader's module table at runtime
+(`react` is never bundled). `exports["./client"]` points at `dist/client.js`,
+and the package's `dsh.client` declaration tells the modules node half to
+serve it under `/plugins/threadtrail-client/client.js` regardless.
+
+Source layout: `client.ts` (entry: apply + exports), `store.ts` (shared
+worktree store), `format.ts`, `icons.tsx` (hand-written SVG icons),
+`highlighter.tsx` (syntax highlighting), `css.ts` (stylesheet), and
+`components/` (`panel.tsx`, `timeline.tsx`, `worktree.tsx`, `overlay.tsx`,
+`footer.tsx`).
+
+## Build & test
+
+```sh
+pnpm build      # esbuild → dist/client.js (loader-wrapped)
+pnpm typecheck  # tsc --noEmit
+pnpm test       # node --test test/ (module-loader contract harness)
+```
 
 ## Install (web profile)
 

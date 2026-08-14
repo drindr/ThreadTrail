@@ -3,14 +3,23 @@
 A single-user "software is made between commits" plugin set for the DeepSeek
 Harness **web** profile — the ThreadTrail effect (operation log between commits,
 code ↔ conversation tracing, rewind to any point, agent-queryable history)
-without real multiplayer.
+without real multiplayer. A **pnpm TypeScript workspace** with two packages.
 
 ## Packages
 
 | package | role |
 |---|---|
-| [`threadtrail-server`](threadtrail-server/) | Host plugin: captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), **cleans the op list when a git commit is made** (HEAD-move detection at scan time) or on demand (`POST …/clean`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
-| [`threadtrail-client`](threadtrail-client/) | Browser plugin: a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, one-click rewind, and a sidebar entry that opens the worktree **before any modification** (fresh/blank sessions included). Zero-build classic-script bundle. |
+| [`threadtrail-server`](threadtrail-server/) | Host plugin (TypeScript → `dist/`): captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), **cleans the op list when a git commit is made** (HEAD-move detection at scan time) or on demand (`POST …/clean`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
+| [`threadtrail-client`](threadtrail-client/) | Browser plugin (TypeScript/TSX → esbuild bundle `dist/client.js`): a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, one-click rewind, and a sidebar entry that opens the worktree **before any modification** (fresh/blank sessions included). |
+
+## Build & test
+
+```sh
+pnpm install            # workspace install (typescript, esbuild, @types/*)
+pnpm build              # server: tsc → threadtrail-server/dist; client: esbuild → threadtrail-client/dist/client.js
+pnpm test               # server: node --test on TS sources; client: module-loader bundle test
+pnpm typecheck          # tsc --noEmit in both packages
+```
 
 ## How it works
 
@@ -64,7 +73,8 @@ without real multiplayer.
 Already done for this machine's web profile; to reproduce elsewhere:
 
 ```sh
-# from the repo root
+# from the repo root — build first (the profiles receive built artifacts)
+pnpm install && pnpm build
 dsh plugin --profile web add file:$PWD/threadtrail-server file:$PWD/threadtrail-client
 ```
 
@@ -78,9 +88,12 @@ Then add to `$DSH_HOME/profiles/web/cordis.patch.yml`:
       name: threadtrail-client
 ```
 
-> pnpm `file:` deps are **copied**, not linked: after editing the source,
-> re-sync the copies (`dsh plugin --profile web add file:... --force` or `cp`
-> the changed files into `$DSH_HOME/profiles/web/node_modules/<pkg>/`).
+> pnpm `file:` deps are **copied**, not linked: after editing the source, run
+> `pnpm build` again and re-sync the copies (`dsh plugin --profile web add
+> file:... --force`, or `cp` the package's `package.json` + `dist/` into
+> `$DSH_HOME/profiles/web/node_modules/<pkg>/`). The headless profile on this
+> machine carries `threadtrail-server` as a smoke-test bed — re-sync it the
+> same way.
 
 ## Activate (requires restart)
 
@@ -120,7 +133,6 @@ half.
 ## Tests
 
 ```sh
-cd threadtrail-server && node --test 'test/*.test.mjs'   # capture engine + routes
-# client bundle: loads under the module-loader contract and renders (see the
-# verification script used during development)
+pnpm test    # server: node --test on the TS sources (13 tests); client: bundle harness
+pnpm typecheck
 ```

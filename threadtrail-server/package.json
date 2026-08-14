@@ -3,21 +3,22 @@
   "version": "0.1.0",
   "description": "ThreadTrail capture engine for DeepSeek Harness: records every file edit between turns with stable identity, links edits to the conversation, and serves digests, diffs, and rewind materialization.",
   "type": "module",
-  "main": "index.js",
+  "main": "dist/index.js",
   "exports": {
-    ".": "./index.js",
-    "./capture": "./capture.js"
+    ".": "./dist/index.js",
+    "./capture": "./dist/capture.js"
   },
   "files": [
-    "index.js",
-    "capture.js",
-    "tool.js",
-    "routes.js",
-    "messages.js"
+    "dist"
   ],
   "scripts": {
-    "test": "node --test test/"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.ts\""
   },
   "license": "MIT",
-  "dependencies": {}
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
 }

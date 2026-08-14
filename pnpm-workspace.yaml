@@ -1,0 +1,7 @@
+packages:
+  - threadtrail-server
+  - threadtrail-client
+
+# Packages allowed to run install scripts (esbuild needs its postinstall).
+allowBuilds:
+  esbuild: true

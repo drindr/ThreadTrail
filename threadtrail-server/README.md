@@ -40,18 +40,27 @@ and exposes it to both the agent and the browser.
 
 ## Layout
 
+TypeScript in `src/`, compiled by `tsc` to `dist/` (ESM, `.js` specifiers
+rewritten from `.ts` imports). Tests run the TS sources directly via Node's
+native type stripping — no build needed to test.
+
 | file | role |
 |---|---|
-| `index.js` | Cordis plugin entry (`apply`/`inject`), event wiring |
-| `capture.js` | `CaptureStore`: scans, blobs, diffs, ops, digest, rewind |
-| `tool.js` | `threadtrail` agent tool (`defineTool`) |
-| `routes.js` | `/threadtrail/...` HTTP handlers |
-| `messages.js` | reads prompt text back out of the session log |
+| `src/index.ts` | Cordis plugin entry (`apply`/`inject`), event wiring |
+| `src/capture.ts` | `CaptureStore` / `SessionCapture`: scans, blobs, ops, digest, rewind, reset |
+| `src/diff.ts` | pure line-diff primitives (`computeDiff`, `computeRanges`, `lcsDiff`) |
+| `src/git.ts` | dependency-free `gitHead` resolution |
+| `src/tool.ts` | `threadtrail` agent tool (`defineTool`) |
+| `src/routes.ts` | `/threadtrail/...` HTTP handlers |
+| `src/messages.ts` | reads prompt text back out of the session log |
+| `src/types.ts` | shared op/digest/note record types |
 
-## Test
+## Build & test
 
 ```sh
-node --test 'test/*.test.mjs'   # capture engine + HTTP route handlers
+pnpm build      # tsc → dist/
+pnpm typecheck  # tsc --noEmit
+pnpm test       # node --test on the TS test sources (capture engine + route handlers)
 ```
 
 ## Install (web profile)
