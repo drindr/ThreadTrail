@@ -120,8 +120,10 @@ async function run(args: Record<string, unknown>, sessionId: string | null, stor
       const ids = cap.ops.map((o) => o.id).slice(-20).join(', ');
       return `Op not found. Known op ids (last 20): ${ids || '(none yet)'}.`;
     }
+    // Hydrate the diff text from the diff store (the retained op is lean).
+    const full = await cap.opRecord(op.id) ?? op;
     const prompt = await promptPreview(sessions, sessionId, op.userMessageSeq);
-    const files = op.files.map((f) => {
+    const files = full.files.map((f) => {
       if (f.deleted) return `  - ${f.path} (deleted, was sha ${f.prevSha?.slice(0, 8) ?? '?'})`;
       const diffText = (f.diff ?? []).slice(0, 60).map((l) => `${l.t}${l.text}`).join('\n');
       const more = (f.diff?.length ?? 0) > 60 ? `\n  … (${(f.diff?.length ?? 0) - 60} more diff lines)` : '';

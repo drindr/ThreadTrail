@@ -93,7 +93,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: { store: 
   if (parts.length === 2 && parts[1] === 'status.json' && req.method === 'GET') {
     const rows = [];
     for (const [id, sc] of store.sessions) {
-      rows.push({ sessionId: id, cwd: sc.cwd, ops: sc.ops.length, notes: sc.notes.length });
+      rows.push({
+        sessionId: id,
+        cwd: sc.cwd,
+        ops: sc.ops.length,
+        notes: sc.notes.length,
+        jsonlBytes: await sc.jsonlBytes(),
+        warnings: sc.warnings.slice(),
+      });
     }
     sendJson(res, 200, { enabled: true, root: store.root, sessions: rows });
     return;

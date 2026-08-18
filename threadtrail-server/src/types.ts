@@ -25,7 +25,11 @@ export interface FileChange {
   deleted: boolean;
   added: number;
   removed: number | null;
+  /** Inline diff text. Newly captured ops keep this null and reference the
+   *  diff store instead (`diffSha`); `opRecord()` hydrates it on demand. */
   diff: DiffLine[] | null;
+  /** Content-addressed reference into the diff store (`<root>/diffs/<sha>`). */
+  diffSha?: string | null;
   oldRanges: LineRange[];
   newRanges: LineRange[];
 }
@@ -116,6 +120,8 @@ export interface Digest {
   turnIndex: Record<number, { userMessageSeq: number | null; opIds: string[]; assistantSeqs: number[] }>;
   gitHead: string | null;
   lastClean: { sha: string | null; time: number; trigger: string } | null;
+  /** Non-fatal load diagnostics (e.g. skipped oversized legacy lines). */
+  warnings?: string[];
 }
 
 /** Per-file op history entry served to the worktree viewer. */

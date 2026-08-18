@@ -21,6 +21,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -30,6 +31,7 @@ import { GitIgnore, gitHead } from './git.ts';
 import type {
   Digest,
   DigestOpSummary,
+  DiffLine,
   FileChange,
   FileOpsEntry,
   NoteRecord,
@@ -60,10 +62,43 @@ export const IGNORE_NAMES = new Set([
   '.git', 'node_modules', '.threadtrail', 'target', 'dist', 'build', 'out',
   '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.DS_Store',
   '.idea', '.vscode', 'coverage', '.turbo', '.cache', '.pytest_cache',
+  // Package-manager caches and tool data: huge, churny, content-addressed —
+  // capturing them produced multi-hundred-MB ops in legacy logs.
+  '.npm', '.npm-tmp', '.pnpm-cache', '.pnpm-store', '.yarn', '.pnp', '.bun',
+  '.eslintcache', '.parcel-cache', '.metro-cache', '.vite', '.webpack',
+  '.sass-cache', '.gradle', '.hg', '.svn',
 ]);
 
-/** Files larger than this are excluded from capture (hashed and diffed). */
-export const MAX_CAPTURE_BYTES = 20 * 1024 * 1024;
+/** Names starting with any of these prefixes are excluded from capture too
+ *  (e.g. `chrome-data*` profile trees copied into a workspace). */
+export const IGNORE_PREFIXES = ['chrome-data'];
+
+function matchesIgnoredPrefix(name: string): boolean {
+  for (const prefix of IGNORE_PREFIXES) if (name.startsWith(prefix)) return true;
+  return false;
+}
+
+/** Files at or below this size are fully captured (blob + diff). Larger
+ *  files are left out of the op log entirely — a big file's whole-file
+ *  replace diff is exactly the bloat that ballooned legacy logs. */
+export const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
+
+/** Jsonl lines above this many characters are skipped on load. They only
+ *  occur in legacy logs written before diffs were externalized; parsing
+ *  them costs hundreds of MB per line (V8 strings cap at ~536M chars). */
+export const MAX_LOAD_LINE_CHARS = 16 * 1024 * 1024;
+
+/** Legacy inline diffs above these bounds are migrated into the diff store
+ *  on load, so memory stays bounded even for old logs. */
+export const MAX_INLINE_DIFF_BYTES = 256 * 1024;
+export const MAX_INLINE_DIFF_LINES = 4000;
+
+/** Rough serialized size of a diff line list (bytes). */
+function estimateDiffBytes(lines: DiffLine[]): number {
+  let n = 0;
+  for (const l of lines) n += l.text.length + 16;
+  return n;
+}
 
 /** SHA-256 hex of a UTF-8 string. */
 export function sha256(text: string): string {
@@ -108,6 +143,7 @@ export async function listFiles(root: string, opts: ListFilesOptions = {}): Prom
     }
     for (const entry of entries) {
       if (IGNORE_NAMES.has(entry.name)) continue;
+      if (matchesIgnoredPrefix(entry.name)) continue;
       const abs = path.join(dir, entry.name);
       if (ignore && ignore(normalizeRel(path.relative(root, abs)))) continue;
       if (entry.isDirectory()) {
@@ -142,6 +178,7 @@ async function hashBatch(paths: string[], manifest: Map<string, ManifestEntry>, 
 export class CaptureStore {
   root: string;
   blobsDir: string;
+  diffsDir: string;
   sessionsDir: string;
   notesDir: string;
   sessions = new Map<string, SessionCapture>();
@@ -155,6 +192,7 @@ export class CaptureStore {
     // Canonical harness home (DSH_HOME, or ~/.dsh) — never the bare home dir.
     this.root = root || dshHomePath('threadtrail');
     this.blobsDir = path.join(this.root, 'blobs');
+    this.diffsDir = path.join(this.root, 'diffs');
     this.sessionsDir = path.join(this.root, 'sessions');
     this.notesDir = path.join(this.root, 'notes');
   }
@@ -162,6 +200,7 @@ export class CaptureStore {
   async init(): Promise<void> {
     this._init ??= (async () => {
       await fs.mkdir(this.blobsDir, { recursive: true });
+      await fs.mkdir(this.diffsDir, { recursive: true });
       await fs.mkdir(this.sessionsDir, { recursive: true });
       await fs.mkdir(this.notesDir, { recursive: true });
     })();
@@ -211,6 +250,9 @@ export class SessionCapture {
   lastCleanSha: string | null = null;
   lastCleanTime: number | null = null;
   lastCleanTrigger: string | null = null;
+  // Non-fatal load/scan diagnostics surfaced in status/digest (e.g. skipped
+  // oversized legacy lines). Bounded to a handful of entries.
+  warnings: string[] = [];
   // git-ignore matcher for the workspace (null until first used). Built fresh
   // at every capture scan; the worktree browser reuses it and only reloads
   // when a known ignore file changed on disk.
@@ -307,20 +349,16 @@ export class SessionCapture {
     if (this.loaded) return;
     this.loaded = true;
     try {
-      const text = await fs.readFile(this.jsonlPath(), 'utf8');
-      for (const line of text.split('\n')) {
+      for await (const { lineNo, line } of this.iterJsonlLines()) {
         if (!line.trim()) continue;
         try {
-          const rec = JSON.parse(line) as OpRecord;
-          this.ops.push(rec);
-          const n = Number(rec.id.replace(/^op-/, ''));
-          if (Number.isInteger(n) && n > this.opCounter) this.opCounter = n;
+          await this.ingestOp(JSON.parse(line) as OpRecord);
         } catch {
           // skip a corrupt line — the log is best-effort
         }
       }
     } catch {
-      // no log yet
+      // no log yet (or unreadable)
     }
     try {
       const rec = JSON.parse(await fs.readFile(this.headPath(), 'utf8')) as HeadRecord;
@@ -331,6 +369,88 @@ export class SessionCapture {
     } catch {
       // no head record yet
     }
+  }
+
+  /**
+   * Stream the op log line by line, skipping pathological oversized lines
+   * instead of materializing them (a single legacy line can be hundreds of
+   * MB — far beyond what a JS string can hold). Skipped lines are counted
+   * in `warnings`; their ops are gone from the in-memory view, which is the
+   * safe outcome for logs written before diffs were externalized.
+   */
+  private async *iterJsonlLines(): AsyncGenerator<{ lineNo: number; line: string }> {
+    let st;
+    try {
+      st = await fs.stat(this.jsonlPath());
+    } catch {
+      return;
+    }
+    if (st.size === 0) return;
+    const rs = createReadStream(this.jsonlPath(), { encoding: 'utf8', highWaterMark: 1 << 20 });
+    let buf = '';
+    let lineNo = 0;
+    // True while a single line grew past MAX_LOAD_LINE_CHARS: content is
+    // dropped until its terminating newline, so no oversized string is ever
+    // materialized (legacy lines can be hundreds of MB — beyond what a JS
+    // string can even hold) and the rest of the log still parses.
+    let discarding = false;
+    const warn = (msg: string): void => {
+      if (this.warnings.length < 8) this.warnings.push(msg);
+    };
+    try {
+      for await (const chunk of rs) {
+        if (discarding) {
+          const idx = chunk.indexOf('\n');
+          if (idx < 0) continue; // still inside the oversized line
+          lineNo++; // the oversized line ends here
+          buf = chunk.slice(idx + 1);
+          discarding = false;
+        } else {
+          buf += chunk;
+        }
+        let idx: number;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          lineNo++;
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (line.length > MAX_LOAD_LINE_CHARS) {
+            warn(`line ${lineNo} is ${line.length} chars (>= ${MAX_LOAD_LINE_CHARS}); skipped — consider cleaning this log`);
+            continue;
+          }
+          yield { lineNo, line };
+        }
+        // `buf` now holds a partial line with no newline. If it grew past the
+        // cap it can never be a useful line: drop it without materializing.
+        if (!discarding && buf.length > MAX_LOAD_LINE_CHARS) {
+          warn(`oversized line at line ${lineNo + 1} skipped; consider cleaning this log`);
+          discarding = true;
+          buf = '';
+        }
+      }
+      if (!discarding && buf.length) {
+        lineNo++;
+        yield { lineNo, line: buf };
+      }
+    } finally {
+      rs.destroy();
+    }
+  }
+
+  /**
+   * Fold one parsed op record into memory. Legacy records with a fat inline
+   * `diff` are migrated into the diff store so the retained op stays lean —
+   * this is what keeps memory bounded even when old logs are loaded.
+   */
+  private async ingestOp(rec: OpRecord): Promise<void> {
+    const n = Number(rec.id.replace(/^op-/, ''));
+    if (Number.isInteger(n) && n > this.opCounter) this.opCounter = n;
+    for (const f of rec.files) {
+      if (f.diff && (f.diff.length > MAX_INLINE_DIFF_LINES || estimateDiffBytes(f.diff) > MAX_INLINE_DIFF_BYTES)) {
+        f.diffSha = await this.writeDiff(f.diff);
+        f.diff = null;
+      }
+    }
+    this.ops.push(rec);
   }
 
   /**
@@ -384,6 +504,37 @@ export class SessionCapture {
       return await fs.readFile(path.join(this.store.blobsDir, sha), 'utf8');
     } catch {
       return '';
+    }
+  }
+
+  /** Content-addressed diff store: op records reference diffs by sha and the
+   *  full diff text lives here, so the in-memory op list and the jsonl stay
+   *  lean (legacy logs embedded the diff inline, which ballooned both). */
+  async writeDiff(lines: DiffLine[]): Promise<string> {
+    const text = JSON.stringify(lines);
+    const sha = sha256(text);
+    try {
+      await fs.access(path.join(this.store.diffsDir, sha));
+    } catch {
+      await fs.writeFile(path.join(this.store.diffsDir, sha), text, 'utf8');
+    }
+    return sha;
+  }
+
+  async readDiff(sha: string): Promise<DiffLine[] | null> {
+    try {
+      return JSON.parse(await fs.readFile(path.join(this.store.diffsDir, sha), 'utf8')) as DiffLine[];
+    } catch {
+      return null;
+    }
+  }
+
+  /** Current op-log size on disk (for status/observability). */
+  async jsonlBytes(): Promise<number> {
+    try {
+      return (await fs.stat(this.jsonlPath())).size;
+    } catch {
+      return 0;
     }
   }
 
@@ -492,6 +643,7 @@ export class SessionCapture {
       const prevText = prev?.sha ? await this.readBlob(prev.sha) : '';
       const diff = computeDiff(prevText, content);
       const { oldRanges, newRanges } = computeRanges(diff.lines);
+      const diffSha = await this.writeDiff(diff.lines);
       filesRec.push({
         path: path.relative(this.cwd, abs),
         sha: entry.sha,
@@ -499,7 +651,8 @@ export class SessionCapture {
         deleted: false,
         added: diff.added,
         removed: diff.removed,
-        diff: diff.lines,
+        diff: null,
+        diffSha,
         oldRanges,
         newRanges,
       });
@@ -619,12 +772,24 @@ export class SessionCapture {
       lastClean: this.lastCleanTrigger
         ? { sha: this.lastCleanSha ?? null, time: this.lastCleanTime ?? 0, trigger: this.lastCleanTrigger }
         : null,
+      warnings: this.warnings.slice(),
     };
   }
 
   async opRecord(opId: string): Promise<OpRecord | null> {
     await this.load();
-    return this.ops.find((o) => o.id === opId) ?? null;
+    const op = this.ops.find((o) => o.id === opId) ?? null;
+    if (!op) return null;
+    // Return a clone with diffs hydrated from the diff store. The retained
+    // in-memory op stays lean — mutating it here would re-introduce the
+    // multi-hundred-MB retentions that crashed the process.
+    const copy = structuredClone(op) as OpRecord;
+    for (const f of copy.files) {
+      if (f.diff == null && f.diffSha) {
+        f.diff = await this.readDiff(f.diffSha);
+      }
+    }
+    return copy;
   }
 
   /**
