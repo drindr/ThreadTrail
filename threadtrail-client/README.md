@@ -40,6 +40,12 @@ worktree state treated as one record.
   workspace the worktree record and the diff follow. Refreshes are
   **non-disruptive**: the current diff stays visible while the fresh copy
   loads, and a failed refresh keeps the last diff with an error note.
+- **Mobile (dsh-mobile)** — the client sets `data-dshm-details-page` on
+  `<html>`, opting the details column into dsh-mobile's pager as a third
+  full-width page right of the chat (sidebar | chat | ThreadTrail): a left
+  swipe from the chat page reveals it, and a back button (mobile-only)
+  scrolls back to the chat. The wide-overlay expand button is hidden on
+  phones (the panel is already full-width there). Inert without dsh-mobile.
 
 ## How it loads
 

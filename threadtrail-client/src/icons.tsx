@@ -57,3 +57,8 @@ export function clearIcon(size: number): ReactElement {
 export function chevronIcon(size: number): ReactElement {
   return icon(['M4 6l4 4 4-4'], size);
 }
+
+/** Back (left chevron) — the mobile return-to-chat affordance. */
+export function backIcon(size: number): ReactElement {
+  return icon(['M10 4l-4 4 4 4'], size);
+}

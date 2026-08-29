@@ -53,6 +53,16 @@ export function apply(ctx: ClientCtx): void {
     return () => style.remove();
   }, 'threadtrail-client: styles');
 
+  ctx.effect(() => {
+    // dsh-mobile contract: opt the details column into the mobile pager's
+    // THIRD page (sidebar | chat | ThreadTrail) — a left swipe from the
+    // chat page reveals it. Inert without dsh-mobile (nothing reads the
+    // attribute), so the desktop layout is untouched.
+    const html = document.documentElement;
+    html.setAttribute('data-dshm-details-page', '');
+    return () => html.removeAttribute('data-dshm-details-page');
+  }, 'threadtrail-client: mobile details-page opt-in');
+
   // The `details` column is declared session-scoped by ui-layout; this
   // panel is its occupant. openDetails comes from the layout service so the
   // panel can open the column when a session is selected.

@@ -69,7 +69,12 @@ export const CSS = `
 .ddb-diff-truncated{font-size:10px;color:#b58900}
 
 /* file diff */
-.ddb-opfile{border:1px solid var(--dsw-alias-border-l1,#2a2a2a);border-radius:8px;margin-bottom:8px;overflow:hidden}
+/* lazy rendering: a compare can mount thousands of diff lines across many
+   file cards (~18k DOM nodes measured); content-visibility:auto skips
+   style/layout/paint for file cards scrolled out of view while keeping
+   their measured size (contain-intrinsic-size:auto), so scrolling and
+   whole-document flushes stop paying for offscreen diffs. */
+.ddb-opfile{border:1px solid var(--dsw-alias-border-l1,#2a2a2a);border-radius:8px;margin-bottom:8px;overflow:hidden;content-visibility:auto;contain-intrinsic-size:auto 120px}
 .ddb-opfile-head{display:flex;justify-content:space-between;gap:8px;padding:5px 8px;background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.04))}
 .ddb-opfile-toggle{cursor:pointer;user-select:none}
 .ddb-opfile-toggle:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.10))}
@@ -124,4 +129,16 @@ body[data-ds-dark-theme] .ddb-tok-o{color:#89ddff}
 .ddb-footbtn-wide{width:100%;justify-content:flex-start;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#333)}
 .ddb-footbtn-icon{font-size:14px;line-height:1;display:inline-flex}
 .ddb-footbtn-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* mobile (dsh-mobile): the details panel is the pager's right-hand page.
+   The back button (hidden on desktop) scrolls the pager back to the chat
+   page; the wide-overlay expand button is hidden (the overlay is a desktop
+   surface — the panel itself is already full-width here). */
+.ddb-backbtn{display:none}
+@media (max-width:768px){
+[data-dsh-mobile] .ddb-backbtn{display:inline-flex;width:32px;height:32px;margin-right:2px}
+[data-dsh-mobile] .ddb-expandbtn{display:none}
+[data-dsh-mobile] .ddb-header{padding-top:8px}
+[data-dsh-mobile] .ddb-iconbtn{width:32px;height:32px}
+}
 `;

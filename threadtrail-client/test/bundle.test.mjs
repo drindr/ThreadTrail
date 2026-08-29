@@ -38,6 +38,8 @@ test('bundle registers under the module-loader contract and apply() registers th
   globalThis.document = {
     createElement: () => ({ setAttribute() {}, remove() {} }),
     head: { appendChild() {} },
+    // The mobile details-page opt-in effect tags <html> (dsh-mobile contract).
+    documentElement: { setAttribute() {}, removeAttribute() {} },
   };
   (0, eval)(src);
 
