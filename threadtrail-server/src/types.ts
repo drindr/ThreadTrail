@@ -1,5 +1,5 @@
 /**
- * Shared record types of the ThreadTrail capture engine. Mirrored (loosely)
+ * Shared wire types of the ThreadTrail git-diff service. Mirrored (loosely)
  * by the client bundle's own local types in `threadtrail-client/src/types.ts`.
  */
 
@@ -11,137 +11,70 @@ export interface DiffLine {
   text: string;
 }
 
-/** Inclusive 1-based line range. */
-export interface LineRange {
-  start: number;
-  end: number;
+/** One unified-diff hunk. */
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  /** The text after the closing `@@` (usually the enclosing symbol). */
+  header: string;
+  lines: DiffLine[];
 }
 
-/** One file's change inside an op. */
-export interface FileChange {
+export type DiffFileStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+
+/** One file's diff between the two compared records. */
+export interface DiffFile {
   path: string;
-  sha: string | null;
-  prevSha: string | null;
-  deleted: boolean;
+  /** Set for renames (the previous path) and deletions. */
+  oldPath: string | null;
+  status: DiffFileStatus;
+  binary: boolean;
+  /** True when this file's diff was cut short (large synthesized file). */
+  truncated?: boolean;
   added: number;
-  removed: number | null;
-  /** Inline diff text. Newly captured ops keep this null and reference the
-   *  diff store instead (`diffSha`); `opRecord()` hydrates it on demand. */
-  diff: DiffLine[] | null;
-  /** Content-addressed reference into the diff store (`<root>/diffs/<sha>`). */
-  diffSha?: string | null;
-  oldRanges: LineRange[];
-  newRanges: LineRange[];
+  removed: number;
+  hunks: DiffHunk[];
 }
 
-/** A captured op: every file change recorded at one turn boundary. */
-export interface OpRecord {
+/**
+ * One comparable record of the workspace. `kind: 'worktree'` is the
+ * synthetic record for the uncommitted state (id `worktree`); commits carry
+ * their sha as id; `kind: 'empty'` is git's empty tree (id `empty`), the
+ * base before the first commit.
+ */
+export interface RecordInfo {
   id: string;
-  sessionId: string;
-  atSeq: number;
-  time: number;
-  trigger: string;
-  kind: 'manual' | 'agent';
-  turn: number | null;
-  step: null;
-  userMessageSeq: number | null;
-  assistantSeqs: number[];
-  files: FileChange[];
+  kind: 'worktree' | 'commit' | 'empty';
+  shortSha?: string;
+  subject?: string;
+  author?: string;
+  /** Commit time (ms since epoch). */
+  time?: number;
+  /** First-parent sha of a commit, or null for the root commit. */
+  parent?: string | null;
 }
 
-/** An anchored note pinned to a file's line range. */
-export interface NoteRecord {
-  id: string;
-  path: string;
-  startLine: number;
-  endLine: number;
-  snippet: string;
-  note: string;
-  time: number;
-}
-
-export interface ScanOptions {
-  trigger: string;
-  atSeq: number;
-  turn: number | null;
-  userMessageSeq: number | null;
-  assistantSeqs?: number[];
-}
-
-export interface ResetOptions {
-  trigger: 'commit' | 'manual';
-  sha?: string | null;
-}
-
-/** One row of the worktree listing. */
-export interface TreeEntry {
-  path: string;
-  size: number;
-}
-
-export interface TreeResult {
+/** `GET …/records.json` response. */
+export interface RecordsResult {
+  cwd: string;
+  /** The active comparison root, relative to `cwd` ('' = the workspace root). */
   root: string;
+  isRepo: boolean;
+  gitAvailable: boolean;
+  head: string | null;
+  worktree: { changed: number; untracked: number } | null;
+  records: RecordInfo[];
+  /** When not a git repo: subfolders that are git repositories. */
+  candidates: string[];
+}
+
+/** `GET …/diff.json` response. */
+export interface DiffResult {
+  from: string;
+  to: string;
+  files: DiffFile[];
+  /** True when the payload was cut short (byte / file / line caps). */
   truncated: boolean;
-  files: TreeEntry[];
-}
-
-export interface ReadFileResult {
-  path: string;
-  content: string;
-  truncated: boolean;
-  lines: number;
-}
-
-/** Compact per-file summary inside the digest. */
-export interface DigestFileSummary {
-  path: string;
-  added: number;
-  removed: number | null;
-  deleted: boolean;
-}
-
-export interface DigestOpSummary {
-  id: string;
-  atSeq: number;
-  time: number;
-  trigger: string;
-  kind: 'manual' | 'agent';
-  turn: number | null;
-  userMessageSeq: number | null;
-  assistantSeqs: number[];
-  files: DigestFileSummary[];
-}
-
-export interface Digest {
-  sessionId: string;
-  cwd: string | null;
-  ops: DigestOpSummary[];
-  fileIndex: Record<string, string[]>;
-  turnIndex: Record<number, { userMessageSeq: number | null; opIds: string[]; assistantSeqs: number[] }>;
-  gitHead: string | null;
-  lastClean: { sha: string | null; time: number; trigger: string } | null;
-  /** Non-fatal load diagnostics (e.g. skipped oversized legacy lines). */
-  warnings?: string[];
-}
-
-/** Per-file op history entry served to the worktree viewer. */
-export interface FileOpsEntry {
-  opId: string;
-  turn: number | null;
-  kind: 'manual' | 'agent';
-  time: number;
-  userMessageSeq: number | null;
-  files: Array<{
-    added: number;
-    removed: number | null;
-    deleted: boolean;
-    oldRanges: LineRange[];
-    newRanges: LineRange[];
-  }>;
-}
-
-/** State of one path inside a rewind reconstruction. */
-export interface RewindFileState {
-  path: string;
-  state: 'written' | 'deleted';
 }

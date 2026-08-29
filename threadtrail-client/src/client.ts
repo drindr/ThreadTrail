@@ -1,31 +1,29 @@
 /**
  * ThreadTrail — browser half, entry module.
  *
- * Registers the details-column panel (timeline ⇄ worktree), the wide overlay
- * (`shell.overlay`), and the always-visible sidebar footer entry that makes
- * the workspace browsable before any modification. Bundled by esbuild into a
- * classic-script module-loader bundle (see `build/build.mjs`); `react` stays
- * external and resolves through the loader's module table at runtime.
+ * Registers the details-column panel (record picker + git diff), the wide
+ * overlay (`shell.overlay`), and the always-visible sidebar footer entry that
+ * opens the compare view. Bundled by esbuild into a classic-script
+ * module-loader bundle (see `build/build.mjs`); `react` stays external and
+ * resolves through the loader's module table at runtime.
  */
 
 import { CSS } from './css.ts';
-import { DeltaPanel } from './components/panel.tsx';
-import { WorktreeOverlay } from './components/overlay.tsx';
-import { WorktreeFooterAction } from './components/footer.tsx';
+import { DiffPanel } from './components/panel.tsx';
+import { DiffOverlay } from './components/overlay.tsx';
+import { DiffFooterAction } from './components/footer.tsx';
 import { detectLang, createHighlighter } from './highlighter.tsx';
 
-export { DeltaPanel, WorktreeOverlay, WorktreeFooterAction, detectLang, createHighlighter };
+export { DiffPanel, DiffOverlay, DiffFooterAction, detectLang, createHighlighter };
 
 const NS = 'threadtrail';
 const en = {
   'panel.title': 'ThreadTrail',
-  'panel.subtitle': 'software is made between commits',
+  'panel.subtitle': 'git log · compare records',
   'panel.refresh': 'Refresh',
-  'panel.expand': 'Expand worktree',
+  'panel.expand': 'Expand to wide view',
   'panel.loading': 'Loading…',
   'panel.error': 'ThreadTrail host not reachable ({error})',
-  'panel.tab.timeline': 'Timeline',
-  'panel.tab.worktree': 'Worktree',
 };
 const zh = en; // same key set; English text for now
 
@@ -68,7 +66,7 @@ export function apply(ctx: ClientCtx): void {
         priority: -1,
         inject: () => ({ openDetails: () => ctx.layout.openDetails() }),
       },
-      DeltaPanel,
+      DiffPanel,
     ),
   );
 
@@ -80,22 +78,21 @@ export function apply(ctx: ClientCtx): void {
       locale: NS,
       inject: () => ({}),
     },
-    WorktreeOverlay,
+    DiffOverlay,
   );
 
-  // Always-available worktree trigger in the sidebar footer. Before the
-  // first modification the details column is hidden (the current session is
-  // still blank), so this button is what lets the user browse the workspace
-  // code from the very start.
+  // Always-available entry in the sidebar footer. Before the first message
+  // the details column is hidden (the current session is still blank), so
+  // this button is what opens the compare view from the very start.
   ctx.slots.inject('sidebar.footer.action', () =>
     ctx.slots.register(
       {
         name: 'sidebar.footer.action',
-        id: 'threadtrail-worktree',
+        id: 'threadtrail-diff',
         locale: NS,
         inject: () => ({}),
       },
-      WorktreeFooterAction,
+      DiffFooterAction,
     ),
   );
 }

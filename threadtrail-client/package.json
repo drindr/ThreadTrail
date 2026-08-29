@@ -1,7 +1,7 @@
 {
   "name": "threadtrail-client",
   "version": "0.1.0",
-  "description": "ThreadTrail browser panel for DeepSeek Harness: the operation timeline between commits, message -> diff, code -> conversation, and non-destructive rewind.",
+  "description": "ThreadTrail browser panel for DeepSeek Harness: pick any two git records (commits + the uncommitted worktree state) and read the syntax-highlighted diff between them.",
   "type": "module",
   "main": "index.js",
   "exports": {

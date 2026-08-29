@@ -1,116 +1,70 @@
 /**
  * Wire shapes the browser panel consumes from the host routes. The server's
  * own authoritative types live in `threadtrail-server/src/types.ts`; this is
- * the client-side projection (plus the fields the routes layer enriches, like
- * `prompt`).
+ * the client-side projection.
  */
-
-export interface LineRange {
-  start: number;
-  end: number;
-}
-
-export interface DigestFileSummary {
-  path: string;
-  added: number;
-  removed: number | null;
-  deleted: boolean;
-}
-
-export interface DigestOpSummary {
-  id: string;
-  atSeq: number;
-  time: number;
-  trigger: string;
-  kind: 'manual' | 'agent';
-  turn: number | null;
-  userMessageSeq: number | null;
-  assistantSeqs: number[];
-  files: DigestFileSummary[];
-  /** Added by the routes layer (prompt preview). */
-  prompt?: string | null;
-}
-
-export interface Digest {
-  sessionId: string;
-  cwd: string | null;
-  ops: DigestOpSummary[];
-  fileIndex: Record<string, string[]>;
-  turnIndex: Record<number, { userMessageSeq: number | null; opIds: string[]; assistantSeqs: number[] }>;
-  gitHead: string | null;
-  lastClean: { sha: string | null; time: number; trigger: string } | null;
-}
 
 export interface DiffLine {
   t: ' ' | '+' | '-';
   text: string;
 }
 
-/** Full op record as served by `…/op/<id>.json` (diff included). */
-export interface OpDetail extends DigestOpSummary {
-  sessionId: string;
-  step: null;
-  files: Array<
-    DigestFileSummary & {
-      sha: string | null;
-      prevSha: string | null;
-      diff: DiffLine[] | null;
-      oldRanges: LineRange[];
-      newRanges: LineRange[];
-    }
-  >;
-  prompt?: string | null;
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  header: string;
+  lines: DiffLine[];
 }
 
-export interface TreeEntry {
+export type DiffFileStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+
+export interface DiffFile {
   path: string;
-  size: number;
+  oldPath: string | null;
+  status: DiffFileStatus;
+  binary: boolean;
+  truncated?: boolean;
+  added: number;
+  removed: number;
+  hunks: DiffHunk[];
 }
 
-export interface TreeResult {
-  root: string;
-  truncated: boolean;
-  files: TreeEntry[];
-}
-
-export interface FileOpsEntry {
-  opId: string;
-  turn: number | null;
-  kind: 'manual' | 'agent';
-  time: number;
-  userMessageSeq: number | null;
-  files: Array<{
-    added: number;
-    removed: number | null;
-    deleted: boolean;
-    oldRanges: LineRange[];
-    newRanges: LineRange[];
-  }>;
-  /** Added by the routes layer (prompt preview). */
-  prompt?: string | null;
-}
-
-export interface NoteRecord {
+/** One comparable record: the worktree (uncommitted state), a commit, or the empty tree. */
+export interface RecordInfo {
   id: string;
-  path: string;
-  startLine: number;
-  endLine: number;
-  snippet: string;
-  note: string;
-  time: number;
+  kind: 'worktree' | 'commit' | 'empty';
+  shortSha?: string;
+  subject?: string;
+  author?: string;
+  time?: number;
+  /** First-parent sha of a commit, or null for the root commit. */
+  parent?: string | null;
 }
 
-export interface FileData {
-  path: string;
-  content: string;
+export interface RecordsResult {
+  cwd: string;
+  /** The active comparison root, relative to `cwd` ('' = the workspace root). */
+  root: string;
+  isRepo: boolean;
+  gitAvailable: boolean;
+  head: string | null;
+  worktree: { changed: number; untracked: number } | null;
+  records: RecordInfo[];
+  /** When not a git repo: subfolders that are git repositories. */
+  candidates: string[];
+}
+
+export interface DiffResult {
+  from: string;
+  to: string;
+  files: DiffFile[];
   truncated: boolean;
-  lines: number;
-  ops: FileOpsEntry[];
-  notes: NoteRecord[];
 }
 
-/** One op's rewind progress/result, held in panel state. */
-export type RewindInfo =
-  | { pending: string }
-  | { ok: true; target: string; count: number }
-  | { err: string };
+/** The synthetic record id of the uncommitted worktree state. */
+export const WORKTREE_ID = 'worktree';
+
+/** The synthetic record id of the empty tree (before the first commit). */
+export const EMPTY_ID = 'empty';

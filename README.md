@@ -1,84 +1,59 @@
 # ThreadTrail for DeepSeek Harness
 
-A single-user "software is made between commits" plugin set for the DeepSeek
-Harness **web** profile — the ThreadTrail effect (operation log between commits,
-code ↔ conversation tracing, rewind to any point, agent-queryable history)
-without real multiplayer. A **pnpm TypeScript workspace** with two packages.
+A git-diff comparison plugin set for the DeepSeek Harness **web** profile:
+pick any two **records** of a session's workspace — every commit, with the
+uncommitted worktree state treated as one record — and read the
+syntax-highlighted diff between them, live while the agent works. A **pnpm
+TypeScript workspace** with two packages.
 
 ## Packages
 
 | package | role |
 |---|---|
-| [`threadtrail-server`](threadtrail-server/) | Host plugin (TypeScript → `dist/`): captures every file edit at turn boundaries with stable identity (`op-1`, `op-2`, …), stores content-addressed blobs + an append-only op log under `$DSH_HOME/threadtrail/`, links edits to prompts (`userMessageSeq` / `assistantSeqs`), **cleans the op list when a git commit is made** (HEAD-move detection at scan time) or on demand (`POST …/clean`), registers the agent-facing `threadtrail` tool, and serves `/threadtrail/...` HTTP routes (digest, op detail, non-destructive rewind). |
-| [`threadtrail-client`](threadtrail-client/) | Browser plugin (TypeScript/TSX → esbuild bundle `dist/client.js`): a panel in the session-scoped `details` column — timeline grouped by turn, op → **syntax-highlighted** unified diff, **Worktree tab** (realtime file browser + language-aware viewer with changed-line annotations, **anchored notes on selected text**, per-file op history), an **expandable wide overlay** for comfortable review, one-click rewind, and a sidebar entry that opens the worktree **before any modification** (fresh/blank sessions included). |
+| [`threadtrail-server`](threadtrail-server/) | Host plugin (TypeScript → `dist/`): resolves each session's workspace and serves read-only `/threadtrail/...` HTTP routes — `records.json` (the worktree record with changed/untracked counts + up to 300 commits with first-parent links + the empty-tree record) and `diff.json?from=…&to=…` (commit ↔ commit via `git diff`, commit ↔ worktree including untracked files as additions, inverted when the worktree is the "from" side). |
+| [`threadtrail-client`](threadtrail-client/) | Browser plugin (TypeScript/TSX → esbuild bundle `dist/client.js`): a panel in the session-scoped `details` column — a **git-log timeline** (click a record to view it: commit vs its parent, worktree vs HEAD), two-record compare via per-row `F`/`T` chips (with swap/clear), per-file unified diff with **syntax-highlighted** hunks and status badges, an **expandable wide overlay**, a sidebar footer entry that opens the compare view **before any message** (fresh/blank sessions included), and non-disruptive realtime refresh as the agent edits the workspace. |
 
 ## Build & test
 
 ```sh
 pnpm install            # workspace install (typescript, esbuild, @types/*)
 pnpm build              # server: tsc → threadtrail-server/dist; client: esbuild → threadtrail-client/dist/client.js
-pnpm test               # server: node --test on TS sources; client: module-loader bundle test
+pnpm test               # server: node --test on TS sources (real temp git repos); client: module-loader bundle test
 pnpm typecheck          # tsc --noEmit in both packages
 ```
 
 ## How it works
 
-- **Capture** runs at turn boundaries (`turn/start` records manual edits,
-  `turn/end` records the agent's edits for that turn), content-hash based for
-  correctness on coarse-granularity filesystems. Ignored: `.git`,
-  `node_modules`, `.threadtrail`, `target`, `dist`, `build`, `venv`, …; files
-  > 20 MB excluded. In **git workspaces** (a `.git` directory present) the
-  repository's `.gitignore` files and `.git/info/exclude` are honored too —
-  ignored files are neither captured nor listed in the worktree browser
-  (basename, anchored `/`, directory-only `dir/`, `**` and `!` negation
-  patterns supported, deepest `.gitignore` wins; the global excludes file is
-  not read).
-- **Stable identity** = `(sessionId, opId)`; ops reference the session event
-  seq that bracketed them (`atSeq`), so the op log and the conversation log
-  stay addressable together.
-- **Rewind** is non-destructive: it materializes the workspace state right
-  after an op into `<cwd>/.threadtrail/rewinds/<opId>-<ts>/` (delta snapshot: files
-  never touched by captured history are not copied).
-- **Realtime worktree review**: the panel's Worktree tab lists the workspace
-  files (`/threadtrail/<sessionId>/tree.json`), reads any file
-  (`…/file.json?path=…`, symlink- and traversal-guarded), highlights the lines
-  the latest op changed (anchored by per-op `newRanges` recorded at capture),
-  and shows the file's full op history with prompt previews — refreshed on
-  every conversation-window change while the agent works. Code is
-  **syntax-highlighted** by language (extension-detected, compact built-in
-  tokenizer with cross-line block comments; diffs highlight the code too). The
-  ⛶ button expands the review into a wide overlay (`shell.overlay`) with a
-  side-by-side tree + viewer.
-- **Browse before the modification**: the worktree is not tied to capture —
-  `tree.json`/`file.json` read the live workspace, so a session can be
-  browsed with **zero ops**. The `details` column is hidden while a session is
-  still blank (before its first message), so a ThreadTrail entry in the
-  sidebar footer (`sidebar.footer.action`) opens the wide worktree review for
-  the current session from the very start — read the code before asking the
-  agent to change anything.
-- **Anchored notes** ("notation on selected text"): select code in the viewer
-  and press save on the floating note composer — the note is stored
-  (`POST /threadtrail/<sessionId>/notes`, `DELETE …/notes/<id>`) with its line
-  range and snippet, marked in the gutter, listed under the file, and
-  click-to-jump back to the line.
-- **Clean on commit**: the op log is "between commits" granularity — once the
-  workspace is committed, that window is preserved in git, so the captured ops
-  are safe to clear. At every capture scan the server resolves the workspace
-  git HEAD (`.git/HEAD`, worktree/submodule `.git` files, packed refs — no git
-  binary needed); when HEAD moved, the op log is reset and re-baselined
-  automatically, and the timeline notes "reset after commit <sha>". A **clean**
-  button in the panel header does the same on demand (with a confirm dialog).
-  The last seen HEAD and reset marker are persisted per session, so restarts
-  do not re-trigger a reset for the same commit. Notes are kept.
-- **The agent can query its own history** via the `threadtrail` tool
-  (`status | list | where <path> | why <opId|turn> | rewind <opId>`).
+- **Records** = the workspace's comparable states: the synthetic `worktree`
+  record (everything not yet committed: staged + unstaged tracked changes and
+  untracked files), the commit history (`git log`, newest first, capped at
+  300, each with its first-parent sha so a commit can be viewed against its
+  parent), and the synthetic `empty` record (git's empty tree — the base
+  before the first commit). Workspaces that are not a git repository offer
+  their git-repository **subfolders** (up to 3 levels deep) as selectable
+  comparison roots; hosts without the `git` binary degrade to an explanatory
+  empty state.
+- **Diffing** spawns the `git` binary (commit-to-commit diffs need real git
+  object access): `git diff -M from to` for two commits; `git diff -M <sha>`
+  for worktree involvement, with untracked files (`git ls-files --others
+  --exclude-standard`) synthesized as whole-file additions. The unified patch
+  is parsed into per-file hunks (renames, binary files, quoted paths) with
+  payload caps and a `truncated` flag. Record ids are validated as 40-hex shas
+  before they reach the CLI. The plugin never writes to the workspace.
+- **Realtime review**: the panel refetches the records and the open diff on
+  every conversation-window change, so the worktree record (and its diff)
+  tracks the agent's edits as they land. The previous diff stays on screen
+  while a refresh loads.
+- **Wide overlay**: the details column is capped at 520px by the shell layout,
+  so an expand button / sidebar footer entry opens a wide `shell.overlay`
+  (up to 78vw) with the record list beside the diff, sharing the same store.
 
 ## Install
 
 Already done for this machine's web profile; to reproduce elsewhere:
 
 ```sh
-# 1. prerequisites: Node.js >= 22 (native TS support), pnpm, and dsh on PATH
+# 1. prerequisites: Node.js >= 22 (native TS support), pnpm, git, and dsh on PATH
 
 # 2. clone + install + build the workspace (build produces the dist/ artifacts
 #    the profiles receive)
@@ -103,13 +78,14 @@ Then add to `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
 Restart `dsh web` and hard-refresh the browser tab (see "Activate" below).
 
-### Headless profile (optional smoke-test bed)
+### Headless profile (optional)
 
 ```sh
 dsh plugin --profile headless add file:$PWD/threadtrail-server
 ```
 
-and add `threadtrail-server` to `$DSH_HOME/profiles/headless/cordis.patch.yml`.
+and add `threadtrail-server` to `$DSH_HOME/profiles/headless/cordis.patch.yml`
+(routes only register where a web server exists, so this is inert there).
 
 ### After editing the source
 
@@ -127,43 +103,27 @@ The running web GUI predates the plugin — restart it:
 3. Hard-refresh the browser tab (the client bundle is composed into the page's
    boot graph at load time).
 
-Then: open any session with a conversation and the **ThreadTrail** panel appears in
-the right-hand column (it auto-opens the details column; close it like any
-panel). `curl http://127.0.0.1:3080/threadtrail/status.json` confirms the server
-half.
+Then: open any session and the **ThreadTrail** panel appears in the right-hand
+column (it auto-opens the details column; close it like any panel).
+`curl http://127.0.0.1:3080/threadtrail/status.json` confirms the server half.
 
 ## What to expect / known tradeoffs
 
-- Capture starts fresh per session: the first turn of a session establishes the
-  baseline, so edits from *before* the plugin was active (including this
-  session) are not in the log. The worktree browser itself is unaffected —
-  it reads the live workspace, so it works before the first baseline too.
-- Git-ignore filtering is only active when the workspace root is itself a git
-  repository (`.git` present at the root — matching the HEAD-detection
-  scope). A file that becomes git-ignored mid-session is reported as removed
-  at the next scan and stops being traced; `.gitignore` edits are picked up at
-  the next capture scan, and the worktree browser re-checks ignore files on
-  disk. Note the re-inclusion rule is git's: a file under an excluded
-  directory cannot be re-included with `!` unless the directory is
-  re-included first (use `dir/*` + `!dir/file` instead of `dir/`).
-- Commits reset the op list (auto-detected HEAD move, or the manual clean
-  button). Any HEAD movement — commit, branch switch, reset — counts, since
-  in every case the workspace state is a git state. Pre-commit ops are gone
-  from the panel, but the code itself is preserved in git; uncommitted edits
-  in the log are lost when you clean manually (the dialog warns).
+- The plugin needs the `git` binary on the host and a workspace that is a git
+  repository; both degrade to an explicit empty state in the panel.
+- The worktree record is the *live* working tree: it changes as files are
+  edited, so a pinned `HEAD → worktree` diff is a realtime review of pending
+  changes. Untracked files appear as whole-file additions (capped per file).
+- Very large diffs are truncated host-side (24 MB patch / 500 files / 20 000
+  lines) and flagged in the UI.
 - The panel occupies the `details` column at `priority: -1`, shadowing
   ui-conversation's built-in tool-inspector panel (single slot, lowest priority
   wins). Restore coexistence by moving the ThreadTrail panel to a different
   surface.
-- The headless profile on this machine also carries `threadtrail-server` (a
-  smoke-test bed): `dsh --profile headless "use the threadtrail tool to list what changed"`.
-  Remove the two lines from `profiles/headless/cordis.patch.yml` to disable.
-- Multi-machine replication, virtualized worktrees, and shared threads are
-  deliberately out of scope (single user + agent collaboration).
 
 ## Tests
 
 ```sh
-pnpm test    # server: node --test on the TS sources (27 tests); client: bundle harness
+pnpm test    # server: node --test on the TS sources; client: bundle harness
 pnpm typecheck
 ```

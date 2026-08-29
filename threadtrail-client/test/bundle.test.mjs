@@ -47,7 +47,7 @@ test('bundle registers under the module-loader contract and apply() registers th
     return seeds.get(spec);
   });
 
-  for (const k of ['apply', 'DeltaPanel', 'WorktreeOverlay', 'WorktreeFooterAction', 'detectLang', 'createHighlighter', 'inject']) {
+  for (const k of ['apply', 'DiffPanel', 'DiffOverlay', 'DiffFooterAction', 'detectLang', 'createHighlighter', 'inject']) {
     assert.ok(k in exports, `bundle should export ${k}`);
   }
   assert.equal(typeof exports.apply, 'function');
@@ -74,13 +74,13 @@ test('bundle registers under the module-loader contract and apply() registers th
       if (typeof thunk === 'function') thunk();
     }
   }
-  assert.ok(registrations.some((r) => r.name === 'details' && r.comp === exports.DeltaPanel), 'details panel not registered');
+  assert.ok(registrations.some((r) => r.name === 'details' && r.comp === exports.DiffPanel), 'details panel not registered');
   assert.ok(
-    registrations.some((r) => r.name === 'shell.overlay' && r.id === 'threadtrail-overlay' && r.comp === exports.WorktreeOverlay),
+    registrations.some((r) => r.name === 'shell.overlay' && r.id === 'threadtrail-overlay' && r.comp === exports.DiffOverlay),
     'overlay not registered',
   );
   assert.ok(
-    registrations.some((r) => r.name === 'sidebar.footer.action' && r.id === 'threadtrail-worktree' && r.comp === exports.WorktreeFooterAction),
+    registrations.some((r) => r.name === 'sidebar.footer.action' && r.id === 'threadtrail-diff' && r.comp === exports.DiffFooterAction),
     'footer action not registered',
   );
 

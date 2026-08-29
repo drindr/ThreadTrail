@@ -3,344 +3,172 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { CaptureStore } from '../src/capture.ts';
 import { registerRoutes } from '../src/routes.ts';
 import type { WebServerLike } from '../src/routes.ts';
+import { WORKTREE_ID } from '../src/repo.ts';
 
-async function tempDir(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-routes-'));
+async function tempRepo(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-routes-'));
+  git(dir, ['init']);
+  git(dir, ['config', 'user.email', 'test@example.com']);
+  git(dir, ['config', 'user.name', 'Test']);
+  return dir;
 }
 
-function mockRes(): ServerResponse {
+function git(cwd: string, args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+function mockRes(): ServerResponse & { status: number | null; body(): unknown } {
   const res = {
     chunks: [] as string[],
     status: null as number | null,
-    headers: null as Record<string, unknown> | null,
-    writeHead(status: number, headers: Record<string, unknown>) {
+    writeHead(status: number) {
       this.status = status;
-      this.headers = headers;
     },
     end(text: string) {
       this.chunks.push(text);
     },
-  };
-  return res as unknown as ServerResponse;
-}
-
-function mockSessions(eventsBySession: Record<string, unknown[]>): { get(id: string): { events: unknown[] } | undefined } {
-  return {
-    get(id) {
-      return eventsBySession[id] ? { events: eventsBySession[id] } : undefined;
+    body() {
+      return JSON.parse(this.chunks.join(''));
     },
   };
+  return res as unknown as ServerResponse & { status: number | null; body(): unknown };
 }
 
 function makeHarness() {
   const routes: Array<{ kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }> = [];
-  const webServer: WebServerLike = { register: (r) => routes.push(r as never) };
+  const webServer: WebServerLike = {
+    register(opts) {
+      routes.push(opts);
+    },
+  };
   return { routes, webServer };
 }
 
-test('routes: worktree browse works for a session with no ops (before any modification)', async () => {
-  const root = await tempDir();
-  const ws = path.join(root, 'ws');
-  await fs.mkdir(path.join(ws, 'sub'), { recursive: true });
-  await fs.writeFile(path.join(ws, 'a.txt'), 'one\n', 'utf8');
-  await fs.writeFile(path.join(ws, 'sub', 'b.js'), 'const b = 2;\n', 'utf8');
+function mockReq(url: string, method = 'GET'): IncomingMessage {
+  return { url, method } as unknown as IncomingMessage;
+}
 
-  const store = new CaptureStore({ root: path.join(root, 'data') });
-  await store.init();
-  // Attached on session/created with its cwd; no scan has run — the user
-  // browses the code before any modification has occurred.
-  store.getOrCreate('sess-fresh', ws);
-
-  const sessions = mockSessions({ 'sess-fresh': [] });
+async function setup() {
+  const cwd = await tempRepo();
+  await fs.writeFile(path.join(cwd, 'a.txt'), 'one\n');
+  git(cwd, ['add', '.']);
+  git(cwd, ['commit', '-m', 'first']);
   const { routes, webServer } = makeHarness();
-  registerRoutes(webServer, { store, sessions });
-  const handler = routes[0].handler;
+  const sessions = { get: (id: string) => (id === 'sess-1' ? { header: { cwd } } : undefined) };
+  registerRoutes(webServer, { sessions });
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].path, '/threadtrail');
+  return { handler: routes[0].handler, cwd };
+}
 
-  // digest: empty op list, still 200
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/digest.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { ops: unknown[]; fileIndex: unknown };
-    assert.deepEqual(body.ops, []);
-    assert.deepEqual(body.fileIndex, {});
-  }
-
-  // tree: live workspace listing without any capture
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/tree.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { files: Array<{ path: string }> };
-    assert.deepEqual(body.files.map((f) => f.path).sort(), ['a.txt', 'sub/b.js']);
-  }
-
-  // file: content + empty per-file op history
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-fresh/file.json?path=sub/b.js' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { content: string; lines: number; ops: unknown[]; notes: unknown[] };
-    assert.equal(body.content, 'const b = 2;\n');
-    assert.equal(body.lines, 1);
-    assert.deepEqual(body.ops, []);
-    assert.deepEqual(body.notes, []);
-  }
-
-  await fs.rm(root, { recursive: true, force: true });
+test('status.json answers without a session', async () => {
+  const { handler } = await setup();
+  const res = mockRes();
+  await handler(mockReq('/threadtrail/status.json'), res);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body(), { enabled: true });
 });
 
-test('routes: digest, op, rewind, status, and error paths', async () => {
-  const root = await tempDir();
-  const ws = path.join(root, 'ws');
-  await fs.mkdir(ws, { recursive: true });
-  await fs.writeFile(path.join(ws, 'a.txt'), 'one\n', 'utf8');
-  await fs.writeFile(path.join(ws, 'b.txt'), 'bee\n', 'utf8');
+test('records.json serves the record list of the session workspace', async () => {
+  const { handler } = await setup();
+  const res = mockRes();
+  await handler(mockReq('/threadtrail/sess-1/records.json'), res);
+  assert.equal(res.status, 200);
+  const body = res.body() as { isRepo: boolean; records: Array<{ id: string; kind: string; subject?: string }> };
+  assert.equal(body.isRepo, true);
+  assert.equal(body.records[0].id, WORKTREE_ID);
+  assert.equal(body.records[1].subject, 'first');
+});
 
-  const store = new CaptureStore({ root: path.join(root, 'data') });
-  await store.init();
-  const sc = store.getOrCreate('sess-abc', ws);
-  await sc.scan({ trigger: 'turn/start', atSeq: 1, turn: null, userMessageSeq: null, assistantSeqs: [] });
-  await fs.writeFile(path.join(ws, 'a.txt'), 'one\ntwo\n', 'utf8');
-  await sc.scan({ trigger: 'turn/end', atSeq: 5, turn: 1, userMessageSeq: 3, assistantSeqs: [4] });
+test('diff.json diffs two records selected by the user', async () => {
+  const { handler, cwd } = await setup();
+  const head = git(cwd, ['rev-parse', 'HEAD']).trim();
+  await fs.writeFile(path.join(cwd, 'a.txt'), 'one\ntwo\n');
 
-  const sessions = mockSessions({
-    'sess-abc': [
-      { seq: 3, type: 'user/message', data: { content: [{ type: 'text', text: 'add a line please' }] } },
-    ],
-  });
+  const res = mockRes();
+  await handler(mockReq(`/threadtrail/sess-1/diff.json?from=${head}&to=${WORKTREE_ID}`), res);
+  assert.equal(res.status, 200);
+  const body = res.body() as { files: Array<{ path: string; added: number }> };
+  assert.equal(body.files.length, 1);
+  assert.equal(body.files[0].path, 'a.txt');
+  assert.equal(body.files[0].added, 1);
+});
+
+test('unknown sessions and bad ids are rejected', async () => {
+  const { handler } = await setup();
+
+  const noSession = mockRes();
+  await handler(mockReq('/threadtrail/ghost/records.json'), noSession);
+  assert.equal(noSession.status, 400);
+
+  const badSession = mockRes();
+  await handler(mockReq('/threadtrail/bad_id!/records.json'), badSession);
+  assert.equal(badSession.status, 400);
+
+  const badRecord = mockRes();
+  await handler(mockReq('/threadtrail/sess-1/diff.json?from=--help&to=worktree'), badRecord);
+  assert.equal(badRecord.status, 400);
+
+  const notFound = mockRes();
+  await handler(mockReq('/threadtrail/sess-1/nope.json'), notFound);
+  assert.equal(notFound.status, 404);
+
+  const method = mockRes();
+  await handler(mockReq('/threadtrail/sess-1/records.json', 'POST'), method);
+  assert.equal(method.status, 405);
+});
+
+test('non-git workspaces offer git subfolders selectable via ?root=', async () => {
+  // Workspace is NOT a repo; sess-2's workspace contains one in sub/.
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-root-'));
+  git(cwd, ['init', 'sub']);
+  git(path.join(cwd, 'sub'), ['config', 'user.email', 'test@example.com']);
+  git(path.join(cwd, 'sub'), ['config', 'user.name', 'Test']);
+  await fs.writeFile(path.join(cwd, 'sub', 'a.txt'), 'one\n');
+  git(path.join(cwd, 'sub'), ['add', '.']);
+  git(path.join(cwd, 'sub'), ['commit', '-m', 'sub commit']);
+  const subHead = git(path.join(cwd, 'sub'), ['rev-parse', 'HEAD']).trim();
 
   const { routes, webServer } = makeHarness();
-  registerRoutes(webServer, { store, sessions });
-  assert.equal(routes.length, 1);
-  assert.equal(routes[0].kind, 'prefix');
-  assert.equal(routes[0].path, '/threadtrail');
-  // Fidelity to the webserver's matcher: a prefix route matches only when
-  // pathname.startsWith(prefix + "/") (or equals it) — a trailing slash on the
-  // prefix would demand a double slash and never match.
-  {
-    const { path } = routes[0];
-    for (const probe of ['/threadtrail/status.json', '/threadtrail/sess-abc/digest.json', '/threadtrail']) {
-      assert.ok(probe === path || probe.startsWith(`${path}/`), `matcher should accept ${probe}`);
-    }
-    assert.ok(!'/threadtrailX/status.json'.startsWith(`${path}/`), 'sibling paths must not match');
-  }
-
+  registerRoutes(webServer, { sessions: { get: () => ({ header: { cwd } }) } });
   const handler = routes[0].handler;
 
-  // digest
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/digest.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { ops: Array<{ prompt: string }>; fileIndex: Record<string, string[]> };
-    assert.equal(body.ops.length, 1);
-    assert.equal(body.ops[0].prompt, 'add a line please');
-    assert.deepEqual(body.fileIndex['a.txt'], ['op-1']);
-  }
+  // Without root: not a repo, but candidates point at the subfolder.
+  const res = mockRes();
+  await handler(mockReq('/threadtrail/sess-2/records.json'), res);
+  assert.equal(res.status, 200);
+  const body = res.body() as { isRepo: boolean; root: string; candidates: string[] };
+  assert.equal(body.isRepo, false);
+  assert.equal(body.root, '');
+  assert.deepEqual(body.candidates, ['sub']);
 
-  // op detail with full diff
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/op/op-1.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { files: Array<{ added: number; diff: unknown }>; prompt: string };
-    assert.equal(body.files[0].added, 1);
-    assert.ok(Array.isArray(body.files[0].diff));
-    assert.equal(body.prompt, 'add a line please');
-  }
+  // With root=sub: the subfolder's records.
+  const res2 = mockRes();
+  await handler(mockReq('/threadtrail/sess-2/records.json?root=sub'), res2);
+  assert.equal(res2.status, 200);
+  const body2 = res2.body() as { isRepo: boolean; root: string; records: Array<{ id: string; subject?: string }> };
+  assert.equal(body2.isRepo, true);
+  assert.equal(body2.root, 'sub');
+  assert.equal(body2.records[1].subject, 'sub commit');
 
-  // rewind
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/rewind/op-1.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { target: string };
-    const content = await fs.readFile(path.join(body.target, 'a.txt'), 'utf8');
-    assert.equal(content, 'one\ntwo\n');
-  }
+  // Diff under the subfolder root.
+  await fs.writeFile(path.join(cwd, 'sub', 'a.txt'), 'one\ntwo\n');
+  const res3 = mockRes();
+  await handler(mockReq(`/threadtrail/sess-2/diff.json?root=sub&from=${subHead}&to=${WORKTREE_ID}`), res3);
+  assert.equal(res3.status, 200);
+  assert.equal((res3.body() as { files: Array<{ path: string }> }).files[0].path, 'a.txt');
 
-  // status
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/status.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { enabled: boolean; sessions: Array<{ sessionId: string }> };
-    assert.equal(body.enabled, true);
-    assert.ok(body.sessions.some((s) => s.sessionId === 'sess-abc'));
-  }
+  // Traversal is rejected.
+  const res4 = mockRes();
+  await handler(mockReq('/threadtrail/sess-2/records.json?root=../..'), res4);
+  assert.equal(res4.status, 400);
 
-  // errors: unknown op, invalid session id, wrong method
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/op/op-99.json' } as never, res);
-    assert.equal(res.status, 404);
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/bad.id/digest.json' } as never, res);
-    assert.equal(res.status, 400);
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'POST', url: '/threadtrail/sess-abc/digest.json' } as never, res);
-    assert.equal(res.status, 405);
-  }
-
-  // worktree browser: tree listing
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/tree.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { files: Array<{ path: string }> };
-    assert.deepEqual(body.files.map((f) => f.path).sort(), ['a.txt', 'b.txt']);
-  }
-
-  // worktree browser: file content + per-file op history with ranges
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=a.txt' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as {
-      content: string;
-      lines: number;
-      ops: Array<{ opId: string; files: Array<{ newRanges: Array<{ start: number; end: number }> }>; prompt: string }>;
-    };
-    assert.equal(body.content, 'one\ntwo\n');
-    assert.equal(body.lines, 2);
-    assert.equal(body.ops.length, 1);
-    assert.equal(body.ops[0].opId, 'op-1');
-    assert.deepEqual(body.ops[0].files[0].newRanges, [{ start: 2, end: 2 }]);
-    assert.equal(body.ops[0].prompt, 'add a line please');
-  }
-
-  // traversal guard: escaping paths are refused
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: `/threadtrail/sess-abc/file.json?path=${encodeURIComponent('../secret.txt')}` } as never, res);
-    assert.equal(res.status, 400);
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=missing.txt' } as never, res);
-    assert.equal(res.status, 404);
-  }
-
-  // notes: POST an anchored note, read it back via file.json, DELETE it
-  {
-    const res = mockRes();
-    await handler(
-      {
-        method: 'POST',
-        url: '/threadtrail/sess-abc/notes',
-        [Symbol.asyncIterator]: async function* () {
-          yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 2, endLine: 2, snippet: 'two', note: 'check this' }));
-        },
-      } as never,
-      res,
-    );
-    assert.equal(res.status, 200);
-    const note = JSON.parse(res.chunks.join('')) as { id: string; path: string };
-    assert.equal(note.id, 'n-1');
-    assert.equal(note.path, 'a.txt');
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=a.txt' } as never, res);
-    const body = JSON.parse(res.chunks.join('')) as { notes: Array<{ note: string }> };
-    assert.equal(body.notes.length, 1);
-    assert.equal(body.notes[0].note, 'check this');
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/file.json?path=b.txt' } as never, res);
-    const body = JSON.parse(res.chunks.join('')) as { notes: unknown[] };
-    assert.equal(body.notes.length, 0);
-  }
-  // validation: escaping path, bad range, empty note
-  {
-    const res = mockRes();
-    await handler(
-      {
-        method: 'POST',
-        url: '/threadtrail/sess-abc/notes',
-        [Symbol.asyncIterator]: async function* () {
-          yield Buffer.from(JSON.stringify({ path: '../x', startLine: 1, endLine: 1, note: 'x' }));
-        },
-      } as never,
-      res,
-    );
-    assert.equal(res.status, 400);
-  }
-  {
-    const res = mockRes();
-    await handler(
-      {
-        method: 'POST',
-        url: '/threadtrail/sess-abc/notes',
-        [Symbol.asyncIterator]: async function* () {
-          yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 5, endLine: 2, note: 'x' }));
-        },
-      } as never,
-      res,
-    );
-    assert.equal(res.status, 400);
-  }
-  {
-    const res = mockRes();
-    await handler(
-      {
-        method: 'POST',
-        url: '/threadtrail/sess-abc/notes',
-        [Symbol.asyncIterator]: async function* () {
-          yield Buffer.from(JSON.stringify({ path: 'a.txt', startLine: 1, endLine: 1, note: '   ' }));
-        },
-      } as never,
-      res,
-    );
-    assert.equal(res.status, 400);
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'DELETE', url: '/threadtrail/sess-abc/notes/n-1' } as never, res);
-    assert.equal(res.status, 200);
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'DELETE', url: '/threadtrail/sess-abc/notes/n-1' } as never, res);
-    assert.equal(res.status, 404);
-  }
-
-  // clean: POST clears the op list (safe after a commit), and the digest then
-  // reports the reset plus the git HEAD bookkeeping
-  {
-    const res = mockRes();
-    await handler({ method: 'POST', url: '/threadtrail/sess-abc/clean' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { ok: boolean; ops: number; lastClean: { trigger: string } };
-    assert.equal(body.ok, true);
-    assert.equal(body.ops, 0);
-    assert.equal(body.lastClean.trigger, 'manual');
-  }
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/digest.json' } as never, res);
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.chunks.join('')) as { ops: unknown[]; lastClean: { trigger: string }; gitHead: unknown };
-    assert.deepEqual(body.ops, []);
-    assert.equal(body.lastClean.trigger, 'manual');
-    assert.ok('gitHead' in body);
-  }
-  // POST clean is the only clean path; GET is not a clean (falls through to 404)
-  {
-    const res = mockRes();
-    await handler({ method: 'GET', url: '/threadtrail/sess-abc/clean' } as never, res);
-    assert.equal(res.status, 404);
-  }
-
-  await fs.rm(root, { recursive: true, force: true });
+  // A non-repo root diffs 400, not 500.
+  const res5 = mockRes();
+  await handler(mockReq(`/threadtrail/sess-2/diff.json?from=${subHead}&to=${WORKTREE_ID}`), res5);
+  assert.equal(res5.status, 400);
 });

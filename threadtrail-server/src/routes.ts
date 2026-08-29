@@ -1,29 +1,25 @@
 /**
- * HTTP routes for the ThreadTrail panel. Mounted on the web server under the
- * `/threadtrail/` prefix (the web-server exact/prefix table matches before the
- * SPA fallback). GETs for reads; POST/DELETE only for the anchored-notes API
- * and the manual clean. Rewind is non-destructive (materializes into
- * `<cwd>/.threadtrail/rewinds/…`).
+ * HTTP routes for the ThreadTrail git-diff panel. Mounted on the web server
+ * under the `/threadtrail/` prefix (the web-server exact/prefix table matches
+ * before the SPA fallback). Read-only GETs only — comparing records never
+ * touches the workspace.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
-import type { CaptureStore, SessionCapture } from './capture.ts';
-import { promptPreview } from './messages.ts';
-import type { SessionEvent, SessionsLike } from './messages.ts';
-import type { DigestOpSummary, OpRecord } from './types.ts';
+import { collectRecords, diffRecords } from './repo.ts';
+import { isGitRepo } from './git.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
-const OP_ID_RE = /^op-\d+$/;
 
 /** The web-server face this plugin needs (the host webserver satisfies it). */
 export interface WebServerLike {
   register(opts: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): void;
 }
 
-/** The session-store face the routes need for cold-attach. */
-export interface SessionStoreLike extends SessionsLike {
-  get(sessionId: string): { header?: { cwd?: string | null }; events?: SessionEvent[] } | undefined;
+/** The session-store face the routes need for workspace lookup. */
+export interface SessionStoreLike {
+  get(sessionId: string): { header?: { cwd?: string | null } } | undefined;
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -36,34 +32,6 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   res.end(text);
 }
 
-export function sendText(res: ServerResponse, status: number, text: string): void {
-  res.writeHead(status, {
-    'content-type': 'text/plain; charset=utf-8',
-    'content-length': Buffer.byteLength(text),
-  });
-  res.end(text);
-}
-
-const MAX_BODY_BYTES = 64 * 1024;
-
-/** Read and JSON-parse a request body (size-capped). */
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
-      const e = new Error('request body too large');
-      (e as Error & { code: string }).code = 'THREADTRAIL_BODY_TOO_LARGE';
-      throw e;
-    }
-    chunks.push(chunk as Buffer);
-  }
-  const text = Buffer.concat(chunks).toString('utf8');
-  if (!text.trim()) return {};
-  return JSON.parse(text) as Record<string, unknown>;
-}
-
 /**
  * Register the /threadtrail/ routes on the web server.
  *
@@ -71,7 +39,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
  * `pathname.startsWith(prefix + "/")`, so "/threadtrail/" would demand a double
  * slash and never match.
  */
-export function registerRoutes(webServer: WebServerLike, deps: { store: CaptureStore; sessions: SessionStoreLike | undefined }): void {
+export function registerRoutes(webServer: WebServerLike, deps: { sessions: SessionStoreLike | undefined }): void {
   webServer.register({
     kind: 'prefix',
     path: '/threadtrail',
@@ -85,28 +53,20 @@ export function registerRoutes(webServer: WebServerLike, deps: { store: CaptureS
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, deps: { store: CaptureStore; sessions: SessionStoreLike | undefined }): Promise<void> {
-  const { store, sessions } = deps;
+async function handle(req: IncomingMessage, res: ServerResponse, deps: { sessions: SessionStoreLike | undefined }): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean); // ['threadtrail', ...]
 
   if (parts.length === 2 && parts[1] === 'status.json' && req.method === 'GET') {
-    const rows = [];
-    for (const [id, sc] of store.sessions) {
-      rows.push({
-        sessionId: id,
-        cwd: sc.cwd,
-        ops: sc.ops.length,
-        notes: sc.notes.length,
-        jsonlBytes: await sc.jsonlBytes(),
-        warnings: sc.warnings.slice(),
-      });
-    }
-    sendJson(res, 200, { enabled: true, root: store.root, sessions: rows });
+    sendJson(res, 200, { enabled: true });
     return;
   }
 
-  if (parts.length < 3 || parts[0] !== 'threadtrail') {
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (parts.length !== 3 || parts[0] !== 'threadtrail') {
     sendJson(res, 404, { error: 'not found' });
     return;
   }
@@ -116,139 +76,40 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: { store: 
     return;
   }
 
-  const cap = resolveCapture(store, sessions, sessionId);
-
-  // ── notes: POST /threadtrail/<sid>/notes, DELETE /threadtrail/<sid>/notes/<id> ──
-  if (parts[2] === 'notes' && parts.length === 3 && req.method === 'POST') {
-    try {
-      const body = await readBody(req);
-      if (!cap.cwd) {
-        sendJson(res, 400, { error: 'session has no workspace' });
-        return;
-      }
-      const rel = String(body.path ?? '');
-      const abs = await cap.resolveWorkspacePath(rel);
-      if (!abs) {
-        sendJson(res, 400, { error: 'path escapes the workspace' });
-        return;
-      }
-      const startLine = Number(body.startLine);
-      const endLine = Number(body.endLine);
-      const note = typeof body.note === 'string' ? body.note.trim() : '';
-      const snippet = typeof body.snippet === 'string' ? body.snippet.slice(0, 1000) : '';
-      if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
-        sendJson(res, 400, { error: 'invalid line range' });
-        return;
-      }
-      if (!note || note.length > 2000) {
-        sendJson(res, 400, { error: 'note must be 1..2000 characters' });
-        return;
-      }
-      const record = await cap.addNote({ path: rel, startLine, endLine, snippet, note });
-      sendJson(res, 200, record);
-    } catch (err) {
-      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
-      sendJson(res, code === 'THREADTRAIL_BODY_TOO_LARGE' ? 413 : 400, { error: err instanceof Error ? err.message : 'bad request' });
-    }
+  const cwd = deps.sessions?.get(sessionId)?.header?.cwd ?? null;
+  if (!cwd) {
+    sendJson(res, 400, { error: 'session has no workspace' });
     return;
   }
 
-  if (parts[2] === 'notes' && parts.length === 4 && /^n-\d+$/.test(parts[3]) && req.method === 'DELETE') {
-    const removed = await cap.deleteNote(parts[3]);
-    sendJson(res, removed ? 200 : 404, removed ? { ok: true } : { error: `note not found: ${parts[3]}` });
+  // The comparison root: the workspace itself, or a user-picked subfolder
+  // (for workspaces that are not git repositories but contain one).
+  const root = sanitizeRoot(url.searchParams.get('root'));
+  if (root === null) {
+    sendJson(res, 400, { error: 'invalid root' });
+    return;
+  }
+  const effectiveCwd = root ? path.join(cwd, root) : cwd;
+
+  if (parts[2] === 'records.json') {
+    const result = await collectRecords(effectiveCwd);
+    result.root = root;
+    sendJson(res, 200, result);
     return;
   }
 
-  // Manual clean: clear the captured op list. Safe after a commit (the
-  // workspace state is preserved in git); the baseline re-establishes at the
-  // next capture scan. Commits are also detected automatically at scan time.
-  if (parts[2] === 'clean' && parts.length === 3 && req.method === 'POST') {
-    await cap.resetOps({ trigger: 'manual' });
-    sendJson(res, 200, {
-      ok: true,
-      ops: cap.ops.length,
-      gitHead: cap.lastHead ?? null,
-      lastClean: cap.lastCleanTrigger
-        ? { sha: cap.lastCleanSha ?? null, time: cap.lastCleanTime ?? 0, trigger: cap.lastCleanTrigger }
-        : null,
-    });
-    return;
-  }
-
-  if (req.method !== 'GET') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-
-  if (parts[2] === 'digest.json') {
-    await cap.load();
-    const digest = cap.digest();
-    // Enrich each op with a short preview of the prompt that drove it
-    // (code -> conversation at a glance).
-    for (const op of digest.ops) {
-      (op as DigestOpSummary & { prompt?: string | null }).prompt = await promptPreview(sessions, sessionId, op.userMessageSeq);
-    }
-    sendJson(res, 200, digest);
-    return;
-  }
-
-  if (parts[2] === 'op' && parts.length === 4 && OP_ID_RE.test(parts[3].replace(/\.json$/, ''))) {
-    const opId = parts[3].replace(/\.json$/, '');
-    const record = await cap.opRecord(opId);
-    if (!record) {
-      sendJson(res, 404, { error: `op not found: ${opId}` });
+  if (parts[2] === 'diff.json') {
+    if (!(await isGitRepo(effectiveCwd))) {
+      sendJson(res, 400, { error: 'not a git repository' });
       return;
     }
-    (record as OpRecord & { prompt?: string | null }).prompt = await promptPreview(sessions, sessionId, record.userMessageSeq);
-    sendJson(res, 200, record);
-    return;
-  }
-
-  if (parts[2] === 'rewind' && parts.length === 4 && OP_ID_RE.test(parts[3].replace(/\.json$/, ''))) {
-    if (!cap.cwd) {
-      sendJson(res, 400, { error: 'session has no workspace' });
-      return;
-    }
-    const opId = parts[3].replace(/\.json$/, '');
-    const target = path.join(cap.cwd, `.threadtrail`, 'rewinds', `${opId}-${Date.now()}`);
+    const from = url.searchParams.get('from') ?? '';
+    const to = url.searchParams.get('to') ?? '';
     try {
-      const result = await cap.rewind(opId, target);
-      sendJson(res, 200, result);
+      sendJson(res, 200, await diffRecords(effectiveCwd, from, to));
     } catch (err) {
-      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
-      sendJson(res, code === 'THREADTRAIL_OP_NOT_FOUND' ? 404 : 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-    return;
-  }
-
-  if (parts[2] === 'tree.json') {
-    const tree = await cap.tree();
-    if (!tree) {
-      sendJson(res, 400, { error: 'session has no workspace' });
-      return;
-    }
-    sendJson(res, 200, tree);
-    return;
-  }
-
-  if (parts[2] === 'file.json') {
-    const rel = url.searchParams.get('path') ?? '';
-    try {
-      const data = await cap.readFile(rel);
-      // Per-file op history with line ranges + prompt previews: the viewer's
-      // "code -> conversation" anchor data. Notes ride along for the viewer.
-      const ops = await Promise.all(
-        cap.fileOps(rel).map(async (entry) => ({
-          ...entry,
-          prompt: await promptPreview(sessions, sessionId, entry.userMessageSeq),
-        })),
-      );
-      const notes = await cap.notesFor(rel);
-      sendJson(res, 200, { ...data, ops, notes });
-    } catch (err) {
-      const code = err instanceof Error ? (err as Error & { code?: string }).code : undefined;
-      const status = code === 'THREADTRAIL_PATH_ESCAPE' ? 400 : code === 'THREADTRAIL_NO_FILE' ? 404 : 400;
-      sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
+      const code = (err as Error & { code?: string }).code;
+      sendJson(res, code === 'THREADTRAIL_BAD_RECORD' ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
     }
     return;
   }
@@ -257,13 +118,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: { store: 
 }
 
 /**
- * Resolve the capture for a session, cold-attaching it when the session store
- * knows the session (capture then starts on its next events). Always returns a
- * capture — `getOrCreate` never fails.
+ * Validate the `root` query param: a workspace-relative subfolder path.
+ * @returns the normalized relative path ('' = workspace root), or null when
+ *   the value escapes the workspace.
  */
-function resolveCapture(store: CaptureStore, sessions: SessionStoreLike | undefined, sessionId: string): SessionCapture {
-  const existing = store.get(sessionId);
-  if (existing) return existing;
-  const session = sessions?.get(sessionId);
-  return store.getOrCreate(sessionId, session?.header?.cwd ?? null);
+function sanitizeRoot(raw: string | null): string | null {
+  if (raw == null || raw === '' || raw === '.') return '';
+  const norm = path.normalize(raw.replace(/\\/g, '/')).replace(/\\/g, '/');
+  if (norm.startsWith('..') || path.isAbsolute(norm) || norm.includes('\0')) return null;
+  return norm === '.' ? '' : norm;
 }

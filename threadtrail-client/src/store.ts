@@ -1,81 +1,84 @@
 /**
- * The shared worktree store: one state feed for the details panel and the wide
- * overlay, with non-disruptive realtime refresh semantics (the open file's
- * content stays visible and the scroll position is kept while a refresh
- * loads). Consumed through `useWorktree()`.
+ * The shared diff-compare store: one state feed for the details panel and the
+ * wide overlay. Holds the record list (commits + the uncommitted worktree
+ * record), the user's two picked records, and the diff between them, with
+ * non-disruptive realtime refresh semantics (the rendered diff stays visible
+ * while a refresh loads).
  */
 
 import { useSyncExternalStore } from 'react';
 import { hostFetch } from './format.ts';
-import type { FileData, TreeResult } from './types.ts';
+import { EMPTY_ID, WORKTREE_ID } from './types.ts';
+import type { DiffResult, RecordsResult } from './types.ts';
 
-export interface SelectionBox {
-  startLine: number;
-  endLine: number;
-  snippet: string;
-  x: number;
-  y: number;
-}
-
-export interface WorktreeState {
+export interface DiffState {
   sessionId: string | null;
-  tree: TreeResult | null;
-  treeError: string | null;
-  openPath: string | null;
-  fileData: FileData | null;
-  fileError: string | null;
-  fileLoading: boolean;
-  fileRefreshing: boolean;
+  /** The active comparison root (workspace-relative subfolder, '' = root). */
+  root: string;
+  records: RecordsResult | null;
+  recordsError: string | null;
+  /** The two records the user compares (record ids: a commit sha or 'worktree'). */
+  from: string | null;
+  to: string | null;
+  diff: DiffResult | null;
+  diffError: string | null;
+  diffLoading: boolean;
+  /** True while a refetch runs with the previous diff still on screen. */
+  diffRefreshing: boolean;
   overlayOpen: boolean;
-  overlayDismissed: boolean;
-  selection: SelectionBox | null;
-  noteDraft: string;
-  saving: boolean;
 }
 
-const initialState: WorktreeState = {
+const initialState: DiffState = {
   sessionId: null,
-  tree: null,
-  treeError: null,
-  openPath: null,
-  fileData: null,
-  fileError: null,
-  fileLoading: false,
-  fileRefreshing: false,
+  root: '',
+  records: null,
+  recordsError: null,
+  from: null,
+  to: null,
+  diff: null,
+  diffError: null,
+  diffLoading: false,
+  diffRefreshing: false,
   overlayOpen: false,
-  overlayDismissed: false,
-  selection: null,
-  noteDraft: '',
-  saving: false,
 };
 
-export interface WorktreeStoreApi {
-  get(): WorktreeState;
+export interface DiffStoreApi {
+  get(): DiffState;
   subscribe(fn: () => void): () => void;
-  set(patch: Partial<WorktreeState>): void;
+  set(patch: Partial<DiffState>): void;
   reset(sessionId: string): void;
-  fetchTree(sessionId: string): Promise<void>;
-  openFile(sessionId: string, rel: string): Promise<void>;
-  closeFile(): void;
-  /** Realtime: re-read the open file when the agent works. */
-  refreshOpen(sessionId: string): void;
+  fetchRecords(sessionId: string): Promise<void>;
+  /** Realtime: re-read records (and the open diff) when the agent works. */
+  refresh(sessionId: string): void;
+  /**
+   * View a record git-log style: a commit against its first parent (the root
+   * commit against the empty tree), the worktree against HEAD.
+   */
+  viewRecord(sessionId: string, id: string): void;
+  /** Toggle a record as the "from" base of the comparison. */
+  pickFrom(sessionId: string, id: string): void;
+  /** Toggle a record as the "to" target of the comparison. */
+  pickTo(sessionId: string, id: string): void;
+  swap(sessionId: string): void;
+  /** Switch the comparison root to a subfolder (or back with ''). */
+  selectRoot(sessionId: string, root: string): void;
+  clearSelection(): void;
+  fetchDiff(sessionId: string): Promise<void>;
   openOverlay(sessionId: string): void;
   closeOverlay(): void;
-  addNote(sessionId: string): Promise<void>;
-  deleteNote(sessionId: string, id: string): Promise<void>;
 }
 
-export const worktreeStore: WorktreeStoreApi = (() => {
-  let state: WorktreeState = initialState;
+export const diffStore: DiffStoreApi = (() => {
+  let state: DiffState = initialState;
   const listeners = new Set<() => void>();
   let fetchSeq = 0;
 
-  const set = (patch: Partial<WorktreeState>): void => {
+  const set = (patch: Partial<DiffState>): void => {
     state = { ...state, ...patch };
     listeners.forEach((l) => l());
   };
 
-  return {
+  const api: DiffStoreApi = {
     get: () => state,
     subscribe(fn) {
       listeners.add(fn);
@@ -84,107 +87,110 @@ export const worktreeStore: WorktreeStoreApi = (() => {
     set,
     reset(sessionId) {
       fetchSeq++;
-      set({
-        sessionId,
-        tree: null,
-        treeError: null,
-        openPath: null,
-        fileData: null,
-        fileError: null,
-        selection: null,
-        noteDraft: '',
-        saving: false,
-        fileLoading: false,
-        fileRefreshing: false,
-        overlayOpen: false,
-        overlayDismissed: false,
-      });
-      void this.fetchTree(sessionId);
+      set({ ...initialState, sessionId });
+      void this.fetchRecords(sessionId);
     },
-    async fetchTree(sessionId) {
+    async fetchRecords(sessionId) {
       const seq = ++fetchSeq;
-      set({ treeError: null });
       try {
-        const t = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/tree.json`);
+        const r = (await hostFetch(
+          `/threadtrail/${encodeURIComponent(sessionId)}/records.json${state.root ? `?root=${encodeURIComponent(state.root)}` : ''}`,
+        )) as RecordsResult;
         if (seq !== fetchSeq) return;
-        set({ tree: t as TreeResult, treeError: null });
+        const patch: Partial<DiffState> = { records: r, recordsError: null };
+        // Default comparison on first load: HEAD -> uncommitted worktree,
+        // when there is anything uncommitted to look at.
+        if (!state.from && !state.to && r.head && r.worktree && r.worktree.changed + r.worktree.untracked > 0) {
+          patch.from = r.head;
+          patch.to = WORKTREE_ID;
+        }
+        set(patch);
+        if (state.from && state.to) void this.fetchDiff(sessionId);
       } catch (e) {
-        if (seq === fetchSeq) set({ treeError: e instanceof Error ? e.message : String(e) });
+        if (seq === fetchSeq) set({ recordsError: e instanceof Error ? e.message : String(e) });
       }
     },
-    async openFile(sessionId, rel) {
-      // Re-opening the file that is already on screen (the realtime refresh,
-      // or a manual reload) must NOT blank the viewer: keep the current
-      // content visible until the fresh copy arrives, so the reader's place
-      // is not lost. Only the first open shows a loader.
-      const refresh = state.openPath === rel && state.fileData !== null;
+    refresh(sessionId) {
+      // fetchRecords chains fetchDiff when both records are picked.
+      void this.fetchRecords(sessionId);
+    },
+    viewRecord(sessionId, id) {
+      const records = state.records;
+      if (!records || id === EMPTY_ID) return;
+      let from: string;
+      if (id === WORKTREE_ID) {
+        from = records.head ?? EMPTY_ID;
+      } else {
+        const rec = records.records.find((r) => r.id === id);
+        if (!rec) return;
+        from = rec.parent ?? EMPTY_ID;
+      }
+      set({ from, to: id, diffError: null });
+      void this.fetchDiff(sessionId);
+    },
+    pickFrom(sessionId, id) {
+      let { from, to } = state;
+      from = from === id ? null : id;
+      if (from && from === to) to = null; // never compare a record to itself
+      set({ from, to, diff: from && to ? state.diff : null, diffError: null });
+      if (from && to) void this.fetchDiff(sessionId);
+    },
+    pickTo(sessionId, id) {
+      let { from, to } = state;
+      to = to === id ? null : id;
+      if (to && to === from) from = null;
+      set({ from, to, diff: from && to ? state.diff : null, diffError: null });
+      if (from && to) void this.fetchDiff(sessionId);
+    },
+    selectRoot(sessionId, root) {
+      if (state.root === root) return;
+      // A different root means different records: clear the comparison.
+      set({ root, from: null, to: null, diff: null, diffError: null, diffLoading: false, diffRefreshing: false, records: null, recordsError: null });
+      void this.fetchRecords(sessionId);
+    },
+    swap(sessionId) {
+      const { from, to } = state;
+      if (!from || !to) return;
+      set({ from: to, to: from });
+      void this.fetchDiff(sessionId);
+    },
+    clearSelection() {
+      fetchSeq++;
+      set({ from: null, to: null, diff: null, diffError: null, diffLoading: false, diffRefreshing: false });
+    },
+    async fetchDiff(sessionId) {
+      const { from, to } = state;
+      if (!from || !to) return;
       const seq = ++fetchSeq;
-      set(
-        refresh
-          ? { fileRefreshing: true }
-          : { openPath: rel, fileData: null, fileError: null, fileLoading: true, fileRefreshing: false, selection: null, noteDraft: '' },
-      );
+      const refreshing = state.diff !== null;
+      set(refreshing ? { diffRefreshing: true } : { diff: null, diffError: null, diffLoading: true, diffRefreshing: false });
       try {
-        const d = await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/file.json?path=${encodeURIComponent(rel)}`);
+        const d = await hostFetch(
+          `/threadtrail/${encodeURIComponent(sessionId)}/diff.json?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${state.root ? `&root=${encodeURIComponent(state.root)}` : ''}`,
+        );
         if (seq !== fetchSeq) return;
-        set(refresh ? { fileData: d as FileData, fileError: null, fileRefreshing: false } : { fileData: d as FileData, fileError: null, fileLoading: false, fileRefreshing: false });
+        set({ diff: d as DiffResult, diffError: null, diffLoading: false, diffRefreshing: false });
       } catch (e) {
         if (seq === fetchSeq) {
           const message = e instanceof Error ? e.message : String(e);
-          // On a refresh failure keep the last content and surface the error
-          // instead of dropping the viewer.
-          set(refresh ? { fileError: message, fileRefreshing: false } : { fileError: message, fileLoading: false, fileRefreshing: false });
+          set(refreshing ? { diffError: message, diffRefreshing: false } : { diffError: message, diffLoading: false, diffRefreshing: false });
         }
       }
     },
-    closeFile() {
-      set({ openPath: null, fileData: null, fileError: null, selection: null, noteDraft: '', fileRefreshing: false });
-    },
-    refreshOpen(sessionId) {
-      if (state.openPath) void this.openFile(sessionId, state.openPath);
-    },
     openOverlay(sessionId) {
-      set({ overlayOpen: true, sessionId, overlayDismissed: false });
+      set({ overlayOpen: true });
+      if (state.sessionId !== sessionId) this.reset(sessionId);
+      else if (!state.records && !state.recordsError) void this.fetchRecords(sessionId);
     },
     closeOverlay() {
-      set({ overlayOpen: false, selection: null, noteDraft: '', overlayDismissed: true });
-    },
-    async addNote(sessionId) {
-      const s = state;
-      if (!s.selection || !s.noteDraft.trim() || s.saving) return;
-      set({ saving: true });
-      try {
-        await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/notes`, undefined, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            path: s.openPath,
-            startLine: s.selection.startLine,
-            endLine: s.selection.endLine,
-            snippet: s.selection.snippet,
-            note: s.noteDraft,
-          }),
-        });
-        set({ saving: false, selection: null, noteDraft: '' });
-        if (s.openPath) void this.openFile(sessionId, s.openPath);
-      } catch (e) {
-        set({ saving: false, fileError: `note failed: ${e instanceof Error ? e.message : String(e)}` });
-      }
-    },
-    async deleteNote(sessionId, id) {
-      const s = state;
-      try {
-        await hostFetch(`/threadtrail/${encodeURIComponent(sessionId)}/notes/${encodeURIComponent(id)}`, undefined, { method: 'DELETE' });
-        if (s.openPath) void this.openFile(sessionId, s.openPath);
-      } catch (e) {
-        set({ fileError: `delete failed: ${e instanceof Error ? e.message : String(e)}` });
-      }
+      set({ overlayOpen: false });
     },
   };
+  return api;
 })();
 
-export function useWorktree(): WorktreeState {
+export function useDiffStore(): DiffState {
   // Third arg (getServerSnapshot) keeps react-dom/server renders happy;
   // the browser ignores it (client-only rendering).
-  return useSyncExternalStore(worktreeStore.subscribe, worktreeStore.get, worktreeStore.get);
+  return useSyncExternalStore(diffStore.subscribe, diffStore.get, diffStore.get);
 }

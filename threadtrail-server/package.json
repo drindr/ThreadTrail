@@ -1,12 +1,12 @@
 {
   "name": "threadtrail-server",
   "version": "0.1.0",
-  "description": "ThreadTrail capture engine for DeepSeek Harness: records every file edit between turns with stable identity, links edits to the conversation, and serves digests, diffs, and rewind materialization.",
+  "description": "ThreadTrail git-diff service for DeepSeek Harness: lists a session workspace's comparable records (commits + the uncommitted worktree state) and serves the unified diff between any two of them.",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./capture": "./dist/capture.js"
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

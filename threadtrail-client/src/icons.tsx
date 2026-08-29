@@ -43,13 +43,17 @@ export function closeIcon(size: number): ReactElement {
   return icon(['M4 4l8 8M12 4l-8 8'], size, { strokeLinecap: 'round' });
 }
 
-/** Clean (trash can). */
-export function cleanIcon(size: number): ReactElement {
-  return icon(
-    [
-      'M6.5 2.5h3M2.5 4h11M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4',
-      'M6.5 7v4.5M9.5 7v4.5',
-    ],
-    size,
-  );
+/** Swap the two compared records (two opposing arrows). */
+export function swapIcon(size: number): ReactElement {
+  return icon(['M2 5h9M8 2l3 3-3 3M14 11H5M8 8l-3 3 3 3'], size);
+}
+
+/** Clear the selection (× in a circle). */
+export function clearIcon(size: number): ReactElement {
+  return icon(['M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z', 'M5.5 5.5l5 5M10.5 5.5l-5 5'], size);
+}
+
+/** Chevron (collapse/expand toggle). */
+export function chevronIcon(size: number): ReactElement {
+  return icon(['M4 6l4 4 4-4'], size);
 }
