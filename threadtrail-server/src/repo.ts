@@ -174,9 +174,12 @@ export async function findGitSubdirs(cwd: string, maxDepth = 3, maxResults = 50)
 export async function collectRecords(cwd: string): Promise<RecordsResult> {
   const repo = await isGitRepo(cwd);
   const gitOk = repo ? await gitAvailable() : false;
-  const base: RecordsResult = { cwd, root: '', isRepo: repo, gitAvailable: gitOk, head: null, worktree: null, records: [], candidates: [] };
-  if (!repo) return { ...base, candidates: await findGitSubdirs(cwd) };
-  if (!gitOk) return base;
+  // Nested repositories (submodules, vendored checkouts) are always offered
+  // as selectable comparison roots — the workspace root being a repo itself
+  // does not make them less interesting.
+  const candidates = await findGitSubdirs(cwd);
+  const base: RecordsResult = { cwd, root: '', isRepo: repo, gitAvailable: gitOk, head: null, worktree: null, records: [], candidates };
+  if (!repo || !gitOk) return base;
 
   const [head, commits, wt] = await Promise.all([gitHead(cwd), listCommits(cwd), worktreeStatus(cwd)]);
   const records: RecordInfo[] = [{ id: WORKTREE_ID, kind: 'worktree' }];
@@ -186,7 +189,7 @@ export async function collectRecords(cwd: string): Promise<RecordsResult> {
   // The empty tree as the final record: makes the root commit viewable and
   // gives every commit a "from scratch" comparison base.
   if (commits.length) records.push({ id: EMPTY_ID, kind: 'empty' });
-  return { cwd, root: '', isRepo: true, gitAvailable: true, head, worktree: wt, records, candidates: [] };
+  return { cwd, root: '', isRepo: true, gitAvailable: true, head, worktree: wt, records, candidates };
 }
 
 /**

@@ -48,10 +48,14 @@ export const CSS = `
 .ddb-record-sha{font-family:ui-monospace,monospace;font-size:10px;opacity:.6;flex:none}
 
 /* subfolder repo picker */
-.ddb-rootbar{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px dashed var(--dsw-alias-border-l2,#333);border-radius:8px;padding:4px 8px;margin-bottom:6px}
+.ddb-rootbar{display:flex;align-items:center;gap:6px;border:1px dashed var(--dsw-alias-border-l2,#333);border-radius:8px;padding:4px 8px;margin-bottom:6px}
+.ddb-rootbar-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;opacity:.5;flex:none}
 .ddb-rootbar-path{font-family:ui-monospace,monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ddb-rootsel{flex:1;min-width:0;background:var(--dsw-alias-bg-base,#ffffff);color:inherit;border:1px solid var(--dsw-alias-border-l2,#333);border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;padding:2px 4px}
+.ddb-rootsel:focus{outline:none;border-color:var(--dsw-alias-border-l3,#444)}
 .ddb-back{background:none;border:none;color:inherit;cursor:pointer;opacity:.7;padding:2px 0;font-size:12px;white-space:nowrap}
 .ddb-back:hover{opacity:1}
+.ddb-subrepos-toggle{display:inline-flex;align-items:center;gap:4px;margin-top:6px;font-size:11px}
 .ddb-candidates{display:flex;flex-direction:column;gap:2px;margin-bottom:4px}
 .ddb-candidate{display:flex;width:100%;text-align:left;background:none;border:1px solid var(--dsw-alias-border-l1,#2a2a2a);border-radius:8px;padding:6px 8px;cursor:pointer;color:inherit}
 .ddb-candidate:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}

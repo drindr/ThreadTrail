@@ -6,14 +6,14 @@
  * two records to compare. The compare bar above shows the current pair.
  */
 
-import { createElement, Fragment } from 'react';
+import { createElement, Fragment, useState } from 'react';
 import type { ReactElement } from 'react';
 import { fmtTime } from '../format.ts';
 import { diffStore } from '../store.ts';
 import type { DiffState } from '../store.ts';
 import { EMPTY_ID, WORKTREE_ID } from '../types.ts';
 import type { RecordInfo } from '../types.ts';
-import { swapIcon, clearIcon } from '../icons.tsx';
+import { swapIcon, clearIcon, chevronIcon } from '../icons.tsx';
 
 /** Short label for a record id (for the compare bar). */
 export function recordLabel(state: DiffState, id: string | null): string {
@@ -73,23 +73,67 @@ export function RecordsList({ state, sessionId }: { state: DiffState; sessionId:
   ));
   return (
     <Fragment>
-      {state.root ? <RootBar state={state} sessionId={sessionId} /> : null}
+      <RootSwitcher state={state} sessionId={sessionId} />
       <div className="ddb-group-label">git log — click a record to view it · F/T pick two to compare</div>
       <div className="ddb-records">{rows}</div>
+      <SubrepoPicker state={state} sessionId={sessionId} />
     </Fragment>
   );
 }
 
-/** The active subfolder root, with a way back to the workspace root. */
-function RootBar({ state, sessionId }: { state: DiffState; sessionId: string }): ReactElement {
+/** Join a candidate (relative to the active root) with the active root. */
+function joinRoot(root: string, rel: string): string {
+  return root ? `${root}/${rel}` : rel;
+}
+
+/**
+ * Nested repositories (submodules, vendored checkouts) under the active root,
+ * offered as alternative comparison roots. Collapsed by default when the root
+ * itself is a repo; expanded when the root is not one (then it is the main
+ * content — see NoRepoView).
+ */
+export function SubrepoPicker({ state, sessionId, defaultOpen = false }: { state: DiffState; sessionId: string; defaultOpen?: boolean }): ReactElement | null {
+  const candidates = state.records?.candidates ?? [];
+  const [open, setOpen] = useState(defaultOpen);
+  if (!candidates.length) return null;
   return (
-    <div className="ddb-rootbar">
-      <span className="ddb-rootbar-path" title={state.root}>
-        repo: {state.root}
-      </span>
-      <button type="button" className="ddb-back" onClick={() => diffStore.selectRoot(sessionId, '')}>
-        ← workspace root
+    <Fragment>
+      <button type="button" className="ddb-back ddb-subrepos-toggle" onClick={() => setOpen(!open)}>
+        <span className={'ddb-chevron' + (open ? '' : ' ddb-chevron-collapsed')}>{chevronIcon(11)}</span> subfolder repositories ({candidates.length})
       </button>
+      {open ? (
+        <div className="ddb-candidates">
+          {candidates.map((rel) => (
+            <button key={rel} type="button" className="ddb-candidate" title={joinRoot(state.root, rel)} onClick={() => diffStore.selectRoot(sessionId, joinRoot(state.root, rel))}>
+              <span className="ddb-candidate-path">{rel}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </Fragment>
+  );
+}
+
+/**
+ * The repository-root switcher: a persistent dropdown listing the workspace
+ * root plus every workspace-level subfolder repository, so the user can move
+ * between sibling repositories directly (no back-to-root round trip).
+ */
+function RootSwitcher({ state, sessionId }: { state: DiffState; sessionId: string }): ReactElement | null {
+  const cands = state.rootCandidates;
+  if (!cands.length && !state.root) return null;
+  return (
+    <div className="ddb-rootbar" title="Which repository to compare records in">
+      <span className="ddb-rootbar-label">repo</span>
+      <select className="ddb-rootsel" value={state.root} onChange={(e) => diffStore.selectRoot(sessionId, e.target.value)}>
+        <option value="">(workspace root)</option>
+        {cands.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+        {state.root && !cands.includes(state.root) ? <option value={state.root}>{state.root}</option> : null}
+      </select>
     </div>
   );
 }
@@ -97,24 +141,14 @@ function RootBar({ state, sessionId }: { state: DiffState; sessionId: string }):
 /** Not a git repository: offer the subfolders that are. */
 function NoRepoView({ state, sessionId }: { state: DiffState; sessionId: string }): ReactElement {
   const records = state.records!;
-  const candidates = records.candidates ?? [];
   return (
     <Fragment>
-      {state.root ? <RootBar state={state} sessionId={sessionId} /> : null}
+      <RootSwitcher state={state} sessionId={sessionId} />
       <div className="ddb-note">
         {state.root ? `The subfolder ${state.root}` : 'This session’s workspace'} is not a git repository.
       </div>
-      {candidates.length ? (
-        <Fragment>
-          <div className="ddb-group-label">subfolders with a git repository</div>
-          <div className="ddb-candidates">
-            {candidates.map((rel) => (
-              <button key={rel} type="button" className="ddb-candidate" title={rel} onClick={() => diffStore.selectRoot(sessionId, rel)}>
-                <span className="ddb-candidate-path">{rel}</span>
-              </button>
-            ))}
-          </div>
-        </Fragment>
+      {records.candidates?.length ? (
+        <SubrepoPicker state={state} sessionId={sessionId} defaultOpen />
       ) : (
         <div className="ddb-note">No git repository found in its subfolders either.</div>
       )}

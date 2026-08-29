@@ -234,6 +234,19 @@ test('findGitSubdirs finds nested repositories, skipping noise directories', asy
   assert.ok(!found.some((f) => f.includes('node_modules') || f.includes('.hidden')));
 });
 
+test('collectRecords lists nested repositories (submodules) even when the root is a repo', async () => {
+  const dir = await tempRepo();
+  await write(dir, 'a.txt', 'one\n');
+  git(dir, ['add', '.']);
+  git(dir, ['commit', '-m', 'first']);
+  git(dir, ['init', 'vendor/lib']); // nested repo (stands in for a submodule)
+
+  const res = await collectRecords(dir);
+  assert.equal(res.isRepo, true);
+  assert.ok(res.records.length >= 2, 'root repo records present');
+  assert.deepEqual(res.candidates, ['vendor/lib']);
+});
+
 test('collectRecords lists git subfolder candidates outside a repository', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'threadtrail-nogit-'));
   git(dir, ['init', 'sub']);

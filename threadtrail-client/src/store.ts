@@ -15,6 +15,8 @@ export interface DiffState {
   sessionId: string | null;
   /** The active comparison root (workspace-relative subfolder, '' = root). */
   root: string;
+  /** Workspace-level subfolder repositories, cached for the root switcher. */
+  rootCandidates: string[];
   records: RecordsResult | null;
   recordsError: string | null;
   /** The two records the user compares (record ids: a commit sha or 'worktree'). */
@@ -31,6 +33,7 @@ export interface DiffState {
 const initialState: DiffState = {
   sessionId: null,
   root: '',
+  rootCandidates: [],
   records: null,
   recordsError: null,
   from: null,
@@ -98,6 +101,9 @@ export const diffStore: DiffStoreApi = (() => {
         )) as RecordsResult;
         if (seq !== fetchSeq) return;
         const patch: Partial<DiffState> = { records: r, recordsError: null };
+        // Cache the workspace-level repository list for the root switcher
+        // (a subfolder response only knows its own children).
+        if (!state.root) patch.rootCandidates = r.candidates ?? [];
         // Default comparison on first load: HEAD -> uncommitted worktree,
         // when there is anything uncommitted to look at.
         if (!state.from && !state.to && r.head && r.worktree && r.worktree.changed + r.worktree.untracked > 0) {
