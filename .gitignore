@@ -12,3 +12,6 @@ node_modules/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# generated overlay repro page (regenerate with node test/gen-repro.mjs)
+threadtrail-client/test/overlay-repro.html

@@ -114,9 +114,19 @@ body[data-ds-dark-theme] .ddb-tok-o{color:#89ddff}
 .ddb-overlay-title{font-weight:600}
 .ddb-overlay-session{font-size:11px;opacity:.5;font-family:ui-monospace,monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ddb-overlay-body{flex:1;overflow:hidden;display:flex;flex-direction:column;padding:10px 14px}
-.ddb-worksplit{display:grid;grid-template-columns:minmax(240px,34%) 1fr;gap:12px;flex:1;min-height:0}
-.ddb-worksplit-tree{min-width:0;overflow-y:auto;display:flex;flex-direction:column}
-.ddb-worksplit-viewer{min-width:0;overflow-y:auto;display:flex;flex-direction:column}
+/* the implicit grid row must be bounded (minmax(0,1fr)) — an auto row sizes
+   to the diff's max-content, so a single huge file diff stretches the viewer
+   past the overlay's fixed height instead of scrolling inside it, and
+   .ddb-overlay-body's overflow:hidden clips the rest with no way to reach
+   it; min-height:0 on the items lets them shrink to the bounded track. */
+.ddb-worksplit{display:grid;grid-template-columns:minmax(240px,34%) 1fr;grid-template-rows:minmax(0,1fr);gap:12px;flex:1;min-height:0}
+.ddb-worksplit-tree{min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
+.ddb-worksplit-viewer{min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
+/* the viewer is a bounded scroll container, so its total content height now
+   routinely exceeds it — flex children must not shrink (default flex-shrink:1
+   would squash every file card to a sliver once one large file diff pushes
+   the column past the viewer's height); let the overflow scroll instead. */
+.ddb-worksplit-viewer>*{flex-shrink:0}
 .ddb-worksplit-tree .ddb-records{max-height:none;flex:1}
 @media (max-width: 720px){
 .ddb-worksplit{grid-template-columns:1fr}
