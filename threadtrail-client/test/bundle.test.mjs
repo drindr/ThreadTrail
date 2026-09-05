@@ -16,6 +16,7 @@ test('bundle registers under the module-loader contract and apply() registers th
       {
         createElement: () => null,
         Fragment: Symbol('fragment'),
+        memo: (fn) => fn,
         useState: () => [undefined, () => {}],
         useEffect: () => {},
         useCallback: () => {},

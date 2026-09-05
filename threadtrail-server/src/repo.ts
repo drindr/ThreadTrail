@@ -134,6 +134,49 @@ export async function worktreeStatus(cwd: string): Promise<{ changed: number; un
   return { changed, untracked };
 }
 
+/** FNV-1a, mixed over the stamped inputs. */
+function stampHash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** Paths of one porcelain line carry at most this many stat calls. */
+const STAMP_STAT_LIMIT = 400;
+
+/**
+ * A cheap stamp of everything a records/diff answer depends on: the HEAD sha
+ * (commit moves), the porcelain listing (which paths changed / appeared), and
+ * mtime+size of each listed path (content edits — porcelain alone does not
+ * change when an already-modified file is edited again). Untracked
+ * directories stat as one entry, so edits strictly inside an untracked dir
+ * tree do not move the stamp; that one-case staleness is accepted for a stamp
+ * that costs one git spawn plus a few hundred stats instead of a full diff.
+ */
+export async function worktreeStamp(cwd: string): Promise<string> {
+  const head = (await gitHead(cwd)) ?? 'unborn';
+  const out = await runGit(cwd, ['status', '--porcelain'], 4 * 1024 * 1024);
+  const lines = out.text.split('\n').filter(Boolean);
+  const sigs: string[] = [];
+  for (const line of lines.slice(0, STAMP_STAT_LIMIT)) {
+    // Porcelain: two status columns, a space, then the path (renames carry
+    // "old -> new"; the stat fails and records "gone", which is fine — a
+    // rename also moves HEAD or the listing).
+    const p = line.slice(3);
+    try {
+      const st = await fs.stat(path.join(cwd, p));
+      sigs.push(`${st.isDirectory() ? 'd' : 'f'}:${Math.round(st.mtimeMs)}:${st.size}`);
+    } catch {
+      sigs.push('gone');
+    }
+  }
+  const extra = lines.length > STAMP_STAT_LIMIT ? `+${lines.length - STAMP_STAT_LIMIT}` : '';
+  return stampHash(`${head}\n${out.text}\n${sigs.join('|')}${extra}`);
+}
+
 /** Directories never descended into when looking for nested repositories. */
 const SUBDIR_SKIP = new Set(['node_modules', 'dist', 'build', 'target', 'out', 'venv', '.venv', '__pycache__']);
 

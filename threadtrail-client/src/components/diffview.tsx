@@ -3,7 +3,7 @@
  * with syntax-highlighted hunk lines.
  */
 
-import { createElement, Fragment, useMemo, useState } from 'react';
+import { createElement, Fragment, memo, useCallback, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { detectLang, createHighlighter, renderTokens } from '../highlighter.tsx';
 import { diffStore } from '../store.ts';
@@ -35,7 +35,14 @@ export function DiffView({ state, sessionId }: { state: DiffState; sessionId: st
 function DiffResultView({ state, diff, sessionId }: { state: DiffState; diff: DiffResult; sessionId: string }): ReactElement {
   // Collapsed files, keyed by path. Lives here (not in FileDiff) so the
   // collapse-all button can drive it, and survives realtime diff refreshes.
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  // A large diff starts fully collapsed: rendering thousands of highlighted
+  // lines the user never opened is the panel's single most expensive
+  // operation, and the file heads already carry the +/-/status summary.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => {
+    let lines = 0;
+    for (const f of diff.files) for (const h of f.hunks) lines += h.lines.length;
+    return lines > 1500 ? new Set(diff.files.map((f) => f.path)) : new Set();
+  });
   const totals = useMemo(() => {
     let added = 0;
     let removed = 0;
@@ -46,12 +53,16 @@ function DiffResultView({ state, diff, sessionId }: { state: DiffState; diff: Di
     return { added, removed };
   }, [diff]);
 
-  const toggleFile = (path: string): void => {
-    const next = new Set(collapsed);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    setCollapsed(next);
-  };
+  const toggleFile = useCallback((path: string): void => {
+    // Functional update keeps this callback referentially stable, which is
+    // what lets the memoized FileDiff below bail out on unchanged polls.
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
   const allCollapsed = diff.files.length > 0 && diff.files.every((f) => collapsed.has(f.path));
   const toggleAll = (): void => {
     setCollapsed(allCollapsed ? new Set() : new Set(diff.files.map((f) => f.path)));
@@ -78,13 +89,16 @@ function DiffResultView({ state, diff, sessionId }: { state: DiffState; diff: Di
       </div>
       {state.diffError ? <div className="ddb-note ddb-error">refresh failed: {state.diffError} — showing the last diff</div> : null}
       {diff.files.map((f) => (
-        <FileDiff key={f.path} file={f} collapsed={collapsed.has(f.path)} onToggle={() => toggleFile(f.path)} />
+        <FileDiff key={f.path} file={f} collapsed={collapsed.has(f.path)} onToggleFile={toggleFile} />
       ))}
     </Fragment>
   );
 }
 
-function FileDiff({ file, collapsed, onToggle }: { file: DiffFile; collapsed: boolean; onToggle: () => void }): ReactElement {
+/** Memoized: the diff store keeps file objects referentially stable when a
+ *  poll returns unchanged content, so an unchanged poll never re-tokenizes a
+ *  single line. */
+const FileDiff = memo(function FileDiff({ file, collapsed, onToggleFile }: { file: DiffFile; collapsed: boolean; onToggleFile: (path: string) => void }): ReactElement {
   const lang = detectLang(file.path);
   const hl = useMemo(() => createHighlighter(lang), [lang]);
   return (
@@ -93,7 +107,7 @@ function FileDiff({ file, collapsed, onToggle }: { file: DiffFile; collapsed: bo
         className="ddb-opfile-head ddb-opfile-toggle"
         role="button"
         title={collapsed ? 'Expand this file' : 'Collapse this file'}
-        onClick={onToggle}
+        onClick={() => onToggleFile(file.path)}
       >
         <span className={'ddb-chevron' + (collapsed ? ' ddb-chevron-collapsed' : '')}>{chevronIcon(12)}</span>
         <span className="ddb-opfile-path" title={file.oldPath && file.oldPath !== file.path ? `${file.oldPath} → ${file.path}` : file.path}>
@@ -128,4 +142,4 @@ function FileDiff({ file, collapsed, onToggle }: { file: DiffFile; collapsed: bo
       ) : null}
     </div>
   );
-}
+});

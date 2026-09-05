@@ -7,9 +7,20 @@
  */
 
 import { useSyncExternalStore } from 'react';
-import { hostFetch } from './format.ts';
+import { hostFetch, hostFetchText } from './format.ts';
 import { EMPTY_ID, WORKTREE_ID } from './types.ts';
 import type { DiffResult, RecordsResult } from './types.ts';
+
+/** FNV-1a over the raw response text — cheap identity check so a poll that
+ *  returns byte-identical diff content never touches the rendered tree. */
+function fnv1a(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
 
 export interface DiffState {
   sessionId: string | null;
@@ -75,6 +86,10 @@ export const diffStore: DiffStoreApi = (() => {
   let state: DiffState = initialState;
   const listeners = new Set<() => void>();
   let fetchSeq = 0;
+  /** Identity of the last applied diff body — a poll that returns the same
+   *  bytes for the same comparison keeps the rendered tree untouched. */
+  let lastDiffKey: string | null = null;
+  let lastDiffHash = 0;
 
   const set = (patch: Partial<DiffState>): void => {
     state = { ...state, ...patch };
@@ -90,30 +105,44 @@ export const diffStore: DiffStoreApi = (() => {
     set,
     reset(sessionId) {
       fetchSeq++;
+      lastDiffKey = null;
       set({ ...initialState, sessionId });
       void this.fetchRecords(sessionId);
     },
     async fetchRecords(sessionId) {
       const seq = ++fetchSeq;
-      try {
-        const r = (await hostFetch(
-          `/threadtrail/${encodeURIComponent(sessionId)}/records.json${state.root ? `?root=${encodeURIComponent(state.root)}` : ''}`,
-        )) as RecordsResult;
+      // DSH ≥ 0.1.2 materializes host session bindings lazily: right after the
+      // client opens a session, `sessions.get(id)?.header?.cwd` on the host can
+      // still be null and records.json answers 400 "session has no workspace".
+      // That is transient — retry a few times before surfacing the error,
+      // otherwise the panel never loads (and the details column never
+      // auto-opens) for freshly clicked sessions.
+      const delays = [0, 400, 900, 1600, 3000, 5000];
+      for (let attempt = 0; attempt < delays.length; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
         if (seq !== fetchSeq) return;
-        const patch: Partial<DiffState> = { records: r, recordsError: null };
-        // Cache the workspace-level repository list for the root switcher
-        // (a subfolder response only knows its own children).
-        if (!state.root) patch.rootCandidates = r.candidates ?? [];
-        // Default comparison on first load: HEAD -> uncommitted worktree,
-        // when there is anything uncommitted to look at.
-        if (!state.from && !state.to && r.head && r.worktree && r.worktree.changed + r.worktree.untracked > 0) {
-          patch.from = r.head;
-          patch.to = WORKTREE_ID;
+        try {
+          const r = (await hostFetch(
+            `/threadtrail/${encodeURIComponent(sessionId)}/records.json${state.root ? `?root=${encodeURIComponent(state.root)}` : ''}`,
+          )) as RecordsResult;
+          if (seq !== fetchSeq) return;
+          const patch: Partial<DiffState> = { records: r, recordsError: null };
+          // Cache the workspace-level repository list for the root switcher
+          // (a subfolder response only knows its own children).
+          if (!state.root) patch.rootCandidates = r.candidates ?? [];
+          // Default comparison on first load: HEAD -> uncommitted worktree,
+          // when there is anything uncommitted to look at.
+          if (!state.from && !state.to && r.head && r.worktree && r.worktree.changed + r.worktree.untracked > 0) {
+            patch.from = r.head;
+            patch.to = WORKTREE_ID;
+          }
+          set(patch);
+          if (state.from && state.to) void this.fetchDiff(sessionId);
+          return;
+        } catch (e) {
+          if (seq !== fetchSeq) return;
+          if (attempt === delays.length - 1) set({ recordsError: e instanceof Error ? e.message : String(e) });
         }
-        set(patch);
-        if (state.from && state.to) void this.fetchDiff(sessionId);
-      } catch (e) {
-        if (seq === fetchSeq) set({ recordsError: e instanceof Error ? e.message : String(e) });
       }
     },
     refresh(sessionId) {
@@ -162,6 +191,7 @@ export const diffStore: DiffStoreApi = (() => {
     },
     clearSelection() {
       fetchSeq++;
+      lastDiffKey = null;
       set({ from: null, to: null, diff: null, diffError: null, diffLoading: false, diffRefreshing: false });
     },
     async fetchDiff(sessionId) {
@@ -170,12 +200,24 @@ export const diffStore: DiffStoreApi = (() => {
       const seq = ++fetchSeq;
       const refreshing = state.diff !== null;
       set(refreshing ? { diffRefreshing: true } : { diff: null, diffError: null, diffLoading: true, diffRefreshing: false });
+      const key = `${from}->${to}@${state.root}`;
       try {
-        const d = await hostFetch(
+        // Raw text first: a poll whose body is byte-identical to what is on
+        // screen skips the state write entirely, so the rendered diff (the
+        // expensive, per-line highlighted tree) is never reconciled for
+        // nothing.
+        const text = await hostFetchText(
           `/threadtrail/${encodeURIComponent(sessionId)}/diff.json?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${state.root ? `&root=${encodeURIComponent(state.root)}` : ''}`,
         );
         if (seq !== fetchSeq) return;
-        set({ diff: d as DiffResult, diffError: null, diffLoading: false, diffRefreshing: false });
+        const hash = fnv1a(text);
+        if (refreshing && key === lastDiffKey && hash === lastDiffHash) {
+          set({ diffRefreshing: false });
+          return;
+        }
+        lastDiffKey = key;
+        lastDiffHash = hash;
+        set({ diff: JSON.parse(text) as DiffResult, diffError: null, diffLoading: false, diffRefreshing: false });
       } catch (e) {
         if (seq === fetchSeq) {
           const message = e instanceof Error ? e.message : String(e);

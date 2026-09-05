@@ -7,10 +7,52 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
-import { collectRecords, diffRecords } from './repo.ts';
+import { collectRecords, diffRecords, worktreeStamp } from './repo.ts';
 import { isGitRepo } from './git.ts';
 
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+
+/**
+ * Response caches keyed by route + workspace + selection. The client polls
+ * while an agent turn runs, but the underlying git state rarely moves between
+ * ticks — so answers are recomputed only when the worktree stamp moves.
+ * Bodies are stored pre-serialized; anything larger than the cap is served
+ * uncached. Commit-to-commit diffs are immutable and skip stamping entirely.
+ */
+interface CacheEntry {
+  stamp: string;
+  body: string;
+}
+const recordsCache = new Map<string, CacheEntry>();
+const diffCache = new Map<string, CacheEntry>();
+const inflight = new Map<string, Promise<string>>();
+const CACHE_LIMIT = 60;
+const MAX_CACHED_BODY_BYTES = 4 * 1024 * 1024;
+
+function cachePut(map: Map<string, CacheEntry>, key: string, entry: CacheEntry): void {
+  if (entry.body.length > MAX_CACHED_BODY_BYTES) return;
+  if (map.size >= CACHE_LIMIT) map.delete(map.keys().next().value as string);
+  map.set(key, entry);
+}
+
+/** Single-flight: concurrent identical requests share one computation. */
+function computeOnce(key: string, fn: () => Promise<string>): Promise<string> {
+  const existing = inflight.get(key);
+  if (existing) return existing;
+  const p = fn().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
+/** Send a pre-serialized JSON body. */
+function sendRawJson(res: ServerResponse, status: number, text: string): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(text),
+    'cache-control': 'no-store',
+  });
+  res.end(text);
+}
 
 /** The web-server face this plugin needs (the host webserver satisfies it). */
 export interface WebServerLike {
@@ -92,9 +134,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: { session
   const effectiveCwd = root ? path.join(cwd, root) : cwd;
 
   if (parts[2] === 'records.json') {
-    const result = await collectRecords(effectiveCwd);
-    result.root = root;
-    sendJson(res, 200, result);
+    const key = `records|${effectiveCwd}`;
+    const stamp = await worktreeStamp(effectiveCwd);
+    const hit = recordsCache.get(key);
+    if (hit && hit.stamp === stamp) {
+      sendRawJson(res, 200, hit.body);
+      return;
+    }
+    const body = await computeOnce(key, async () => {
+      const result = await collectRecords(effectiveCwd);
+      result.root = root;
+      return JSON.stringify(result);
+    });
+    cachePut(recordsCache, key, { stamp, body });
+    sendRawJson(res, 200, body);
     return;
   }
 
@@ -106,7 +159,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: { session
     const from = url.searchParams.get('from') ?? '';
     const to = url.searchParams.get('to') ?? '';
     try {
-      sendJson(res, 200, await diffRecords(effectiveCwd, from, to));
+      const key = `diff|${effectiveCwd}|${from}|${to}`;
+      // Commit-to-commit diffs are immutable; anything touching the worktree
+      // is stamped so unchanged worktrees skip the git diff entirely.
+      const stamp = from !== 'worktree' && to !== 'worktree' ? 'static' : await worktreeStamp(effectiveCwd);
+      const hit = diffCache.get(key);
+      if (hit && hit.stamp === stamp) {
+        sendRawJson(res, 200, hit.body);
+        return;
+      }
+      const body = await computeOnce(key, async () => JSON.stringify(await diffRecords(effectiveCwd, from, to)));
+      cachePut(diffCache, key, { stamp, body });
+      sendRawJson(res, 200, body);
     } catch (err) {
       const code = (err as Error & { code?: string }).code;
       sendJson(res, code === 'THREADTRAIL_BAD_RECORD' ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
