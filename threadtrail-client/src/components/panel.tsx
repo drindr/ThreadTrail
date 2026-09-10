@@ -1,30 +1,15 @@
 /**
  * The details-column panel: the record picker (commits + the uncommitted
- * worktree record) and the diff between the two picked records, with the
- * realtime refresh wired to the conversation window (while the agent works,
- * the worktree record moves and the diff follows).
+ * worktree record) and the diff between the two picked records. Load once per
+ * session only when requested; workspace updates are explicitly loaded by the user.
  */
 
-import { createElement, Fragment, useEffect, useRef } from 'react';
+import { createElement, useEffect } from 'react';
 import type { ReactElement } from 'react';
 import { diffStore, useDiffStore } from '../store.ts';
 import { CompareBar, RecordsList } from './records.tsx';
 import { DiffView } from './diffview.tsx';
 import { backIcon, expandIcon, refreshIcon } from '../icons.tsx';
-
-/** True only while the page AND the panel itself are on screen. Polling a
- *  hidden panel (closed details column, background tab, offscreen pager page)
- *  burns host git spawns and client re-renders for nothing. */
-function panelVisible(root: HTMLElement | null, onScreen: boolean): boolean {
-  if (document.visibilityState !== 'visible') return false;
-  // IntersectionObserver state: an offscreen pager page (dsh-mobile's third
-  // page) has layout but is scrolled out of the viewport — not visible.
-  if (!onScreen) return false;
-  if (root === null || !root.isConnected) return false;
-  // checkVisibility covers display:none ancestors (closed details column);
-  // older engines without it fall back to "mounted is enough".
-  return typeof root.checkVisibility === 'function' ? root.checkVisibility() : true;
-}
 
 /** Mobile (dsh-mobile) return-to-chat: the details panel is the pager's
  *  right-hand page, so scroll the frame one full page left — the pager's
@@ -49,65 +34,15 @@ export interface DiffPanelProps {
 
 export function DiffPanel(props: DiffPanelProps): ReactElement {
   const sessionId = props.sessionId;
-  const useSession = props.useSession;
-  // DSH ≥ 0.1.2: the session snapshot no longer carries chat `nodes` (chunk-row
-  // projections moved behind the keyed `projection` hook) — the live activity
-  // signal is `running`. Turn edges (start/finish) are exactly when the
-  // worktree record is worth re-reading.
-  const running = useSession ? useSession((s) => !!(s && (s as { running?: boolean }).running)) : false;
   const state = useDiffStore();
-  const rootRef = useRef<HTMLDivElement>(null);
-  /** Viewport-intersection state, kept by the observer below. Starts true so
-   *  pre-IO ticks behave; the observer's initial callback corrects it. */
-  const onScreenRef = useRef(true);
 
   // Reset per-session view state.
   useEffect(() => {
     if (sessionId) diffStore.reset(sessionId);
   }, [sessionId]);
 
-  // Realtime: refetch records (and the open diff) on turn edges — the worktree
-  // record moves as the agent edits the workspace. While a turn runs, poll so
-  // the panel follows file edits live instead of only updating at the end.
-  // Every tick is visibility-gated: a hidden panel or background tab neither
-  // polls nor re-renders, and becoming visible again triggers one refresh.
-  useEffect(() => {
-    if (!sessionId) return;
-    const tick = (): void => {
-      // The initial load runs even while hidden (its records drive the
-      // auto-open below); only repeat refreshes are gated on visibility.
-      if (diffStore.get().records !== null && !panelVisible(rootRef.current, onScreenRef.current)) return;
-      diffStore.refresh(sessionId);
-    };
-    const timer = setTimeout(tick, running ? 400 : 0);
-    const poll = running ? setInterval(tick, 4000) : undefined;
-    const onVisibility = (): void => {
-      if (document.visibilityState === 'visible') tick();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      clearTimeout(timer);
-      if (poll !== undefined) clearInterval(poll);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [sessionId, running]);
-
-  // Refresh once when the panel itself scrolls/opens into view (details
-  // column reopened, mobile pager swiped to it) — visibility-gated ticks skip
-  // those stretches, so the first visible moment catches up.
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!sessionId || el === null || typeof IntersectionObserver !== 'function') return;
-    let wasVisible = false;
-    const io = new IntersectionObserver((entries) => {
-      const visible = entries.some((entry) => entry.isIntersecting);
-      onScreenRef.current = visible;
-      if (visible && !wasVisible && document.visibilityState === 'visible') diffStore.refresh(sessionId);
-      wasVisible = visible;
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [sessionId]);
+  // Deliberately no polling, turn-edge, visibility or intersection refresh.
+  // A changing workspace stays a stable snapshot until Refresh is clicked.
 
   // Auto-open the details column once the session's records have loaded, so
   // the panel is discoverable. Gated on records (not the removed chat-nodes
@@ -130,7 +65,7 @@ export function DiffPanel(props: DiffPanelProps): ReactElement {
   }
 
   return (
-    <div className="ddb-root" ref={rootRef}>
+    <div className="ddb-root">
       <div className="ddb-header">
         <button type="button" className="ddb-iconbtn ddb-backbtn" title="Back to chat" onClick={scrollPagerToChat}>
           {backIcon(14)}

@@ -26,8 +26,8 @@ export async function hostFetch(path: string, signal?: AbortSignal, options?: Re
 }
 
 /** Fetch helper returning the raw body text — for hashing before parsing. */
-export async function hostFetchText(path: string): Promise<string> {
-  const res = await fetch(path, { headers: { accept: 'application/json' } });
+export async function hostFetchText(path: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(path, { signal, headers: { accept: 'application/json' } });
   return (await readHostResponse(res)).text();
 }
 

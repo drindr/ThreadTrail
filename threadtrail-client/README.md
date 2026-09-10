@@ -29,17 +29,10 @@ worktree state treated as one record.
   repository, the panel lists the subfolders that are (up to 3 levels deep)
   and lets you pick one as the comparison root, with a breadcrumb back to
   the workspace root.
-- **Sensible default** — on first load with uncommitted changes present, the
-  panel pre-selects `HEAD → worktree` so the pending diff is one glance away.
-- **Wide overlay** — the details column is capped at 520px by the shell
-  layout, so an expand button (and the sidebar footer entry) opens a wide
-  overlay (`shell.overlay`, up to 78vw / 1200px) with the record list on the
-  left and the diff on the right; it shares state with the details panel.
-- **Live-ish updates** — the panel refetches the records (and the open diff)
-  whenever the conversation window changes, so while the agent edits the
-  workspace the worktree record and the diff follow. Refreshes are
-  **non-disruptive**: the current diff stays visible while the fresh copy
-  loads, and a failed refresh keeps the last diff with an error note.
+- **Manual updates** — opening a session, panel, or overlay performs no git
+  query; the idle list offers **Load records and diff**. Refresh keeps the
+  current diff visible while the fresh copy loads, and a failed refresh keeps
+  the last diff with an error note.
 - **Mobile (dsh-mobile)** — the client sets `data-dshm-details-page` on
   `<html>`, opting the details column into dsh-mobile's pager as a third
   full-width page right of the chat (sidebar | chat | ThreadTrail): a left

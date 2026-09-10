@@ -211,6 +211,54 @@ test('diffRecords supports the empty-tree record (viewing the root commit)', asy
   assert.ok(full.files.every((f) => f.status === 'added'));
 });
 
+test('untracked pnpm storage is excluded before enumeration, tracked cache paths remain visible', async (t) => {
+  const dir = await tempRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await write(dir, '.pnpm-home/tracked.txt', 'tracked\n');
+  git(dir, ['add', '.']);
+  git(dir, ['commit', '-m', 'base']);
+  const head = git(dir, ['rev-parse', 'HEAD']).trim();
+  for (let i = 0; i < 220; i++) await write(dir, `.pnpm-home/cache/${i}.json`, 'cache\n');
+  await write(dir, '.pnpm-home/tracked.txt', 'changed\n');
+  await write(dir, 'z-user.txt', 'visible\n');
+  const result = await diffRecords(dir, head, WORKTREE_ID);
+  assert.deepEqual(result.files.map((f) => f.path), ['.pnpm-home/tracked.txt', 'z-user.txt']);
+  assert.equal(result.truncated, false);
+});
+
+test('untracked long lines have an aggregate byte budget and honest truncation', async (t) => {
+  const dir = await tempRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  git(dir, ['commit', '--allow-empty', '-m', 'base']);
+  const head = git(dir, ['rev-parse', 'HEAD']).trim();
+  for (let i = 0; i < 6; i++) await write(dir, `${i}.json`, 'x'.repeat(300000));
+  const result = await diffRecords(dir, head, WORKTREE_ID);
+  assert.equal(result.truncated, true);
+  assert.ok(result.files.some((f) => f.truncated));
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1100000);
+});
+
+test('untracked file-count omissions mark the result truncated', async (t) => {
+  const dir = await tempRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  git(dir, ['commit', '--allow-empty', '-m', 'base']);
+  const head = git(dir, ['rev-parse', 'HEAD']).trim();
+  for (let i = 0; i < 201; i++) await write(dir, `${i}.txt`, 'x\n');
+  const result = await diffRecords(dir, head, WORKTREE_ID);
+  assert.equal(result.files.length, 200);
+  assert.equal(result.truncated, true);
+});
+
+test('patch parser bounds line and file allocation before materializing payloads', () => {
+  const header = 'diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1,30000 @@\n';
+  const files = parsePatch(header + '+x\n'.repeat(30000));
+  assert.equal(files[0].hunks[0].lines.length, 20000);
+  assert.equal(files[0].truncated, true);
+  const many = parsePatch('diff --git a/a b/a\n'.repeat(501));
+  assert.equal(many.length, 500);
+  assert.equal(many[499].truncated, true);
+});
+
 test('diffRecords rejects invalid record ids', async () => {
   const dir = await tempRepo();
   await assert.rejects(() => diffRecords(dir, '../../etc', WORKTREE_ID), /invalid record id/);

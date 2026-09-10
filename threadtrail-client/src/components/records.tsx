@@ -59,7 +59,12 @@ export function RecordsList({ state, sessionId }: { state: DiffState; sessionId:
     return <div className="ddb-note ddb-error">{state.recordsError}</div>;
   }
   if (!records) {
-    return <div className="ddb-note">Loading records…</div>;
+    return state.recordsLoading ? <div className="ddb-note">Loading records…</div> : (
+      <div className="ddb-note">
+        <button type="button" className="ddb-back" onClick={() => diffStore.refresh(sessionId)}>Load records and diff</button>
+        <div>Manual loading only. No automatic refresh.</div>
+      </div>
+    );
   }
   if (!records.isRepo) {
     return <NoRepoView state={state} sessionId={sessionId} />;

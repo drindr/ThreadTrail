@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 import { gitHead, isGitRepo } from './git.ts';
 import type { DiffFile, DiffHunk, DiffLine, RecordInfo, RecordsResult, DiffResult } from './types.ts';
@@ -33,7 +33,10 @@ function isRecordId(id: string): boolean {
 }
 
 const MAX_COMMITS = 300;
-const MAX_PATCH_BYTES = 24 * 1024 * 1024;
+// Bound work before parsing/serialization, not merely the final line count.
+const MAX_PATCH_BYTES = 1024 * 1024;
+const GIT_TIMEOUT_MS = 5000;
+const UNTRACKED_EXCLUDES = ['--exclude=.pnpm-home/'];
 const MAX_DIFF_FILES = 500;
 const MAX_DIFF_LINES = 20000;
 const MAX_UNTRACKED_FILES = 200;
@@ -64,6 +67,9 @@ function runGit(cwd: string, args: string[], maxBytes = MAX_PATCH_BYTES): Promis
     const errChunks: Buffer[] = [];
     let size = 0;
     let truncated = false;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, GIT_TIMEOUT_MS);
+    timer.unref();
     child.stdout.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > maxBytes) {
@@ -73,12 +79,18 @@ function runGit(cwd: string, args: string[], maxBytes = MAX_PATCH_BYTES): Promis
       }
       chunks.push(chunk);
     });
+    let errSize = 0;
     child.stderr.on('data', (chunk: Buffer) => {
-      if (Buffer.concat(errChunks).length < 4096) errChunks.push(chunk);
+      const kept = chunk.subarray(0, Math.max(0, 4096 - errSize));
+      errSize += kept.length;
+      if (kept.length) errChunks.push(kept);
     });
-    child.on('error', reject);
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.on('close', (code) => {
-      if (truncated) {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`git ${args[0] ?? ''} timed out after ${GIT_TIMEOUT_MS}ms`));
+      } else if (truncated) {
         resolve({ text: Buffer.concat(chunks).toString('utf8'), truncated: true });
       } else if (code === 0) {
         resolve({ text: Buffer.concat(chunks).toString('utf8'), truncated: false });
@@ -123,7 +135,7 @@ export async function listCommits(cwd: string, limit = MAX_COMMITS): Promise<Com
 
 /** Counts of the uncommitted state: tracked changes + untracked files. */
 export async function worktreeStatus(cwd: string): Promise<{ changed: number; untracked: number }> {
-  const out = await runGit(cwd, ['status', '--porcelain'], 4 * 1024 * 1024);
+  const out = await runGit(cwd, ['status', '--porcelain', '--untracked-files=normal'], 4 * 1024 * 1024);
   let changed = 0;
   let untracked = 0;
   for (const line of out.text.split('\n')) {
@@ -157,8 +169,9 @@ const STAMP_STAT_LIMIT = 400;
  * that costs one git spawn plus a few hundred stats instead of a full diff.
  */
 export async function worktreeStamp(cwd: string): Promise<string> {
+  if (!(await isGitRepo(cwd))) return 'not-repo';
   const head = (await gitHead(cwd)) ?? 'unborn';
-  const out = await runGit(cwd, ['status', '--porcelain'], 4 * 1024 * 1024);
+  const out = await runGit(cwd, ['status', '--porcelain', '--untracked-files=normal'], 4 * 1024 * 1024);
   const lines = out.text.split('\n').filter(Boolean);
   const sigs: string[] = [];
   for (const line of lines.slice(0, STAMP_STAT_LIMIT)) {
@@ -189,16 +202,18 @@ const SUBDIR_SKIP = new Set(['node_modules', 'dist', 'build', 'target', 'out', '
  */
 export async function findGitSubdirs(cwd: string, maxDepth = 3, maxResults = 50): Promise<string[]> {
   const out: string[] = [];
+  let visited = 0;
+  const deadline = Date.now() + 1000;
   async function walk(dir: string, rel: string, depth: number): Promise<void> {
-    if (out.length >= maxResults || depth > maxDepth) return;
-    let entries: import('node:fs').Dirent[];
+    if (out.length >= maxResults || depth > maxDepth || visited >= 1000 || Date.now() >= deadline) return;
+    let entries: import('node:fs').Dir;
     try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
+      entries = await fs.opendir(dir);
     } catch {
       return; // unreadable directory — skip
     }
-    for (const entry of entries) {
-      if (out.length >= maxResults) return;
+    for await (const entry of entries) {
+      if (++visited > 1000 || Date.now() >= deadline || out.length >= maxResults) return;
       if (!entry.isDirectory() || entry.name.startsWith('.') || SUBDIR_SKIP.has(entry.name)) continue;
       const childAbs = path.join(dir, entry.name);
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -259,17 +274,20 @@ export async function diffRecords(cwd: string, from: string, to: string): Promis
     patch = await runGit(cwd, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', commit]);
   }
 
-  let files = parsePatch(patch.text);
-  let truncated = patch.truncated;
+  // A killed git process can end mid-line; never parse an incomplete record.
+  const text = patch.truncated ? patch.text.slice(0, patch.text.lastIndexOf('\n') + 1) : patch.text;
+  let files = parsePatch(text);
+  let truncated = patch.truncated || files.some((f) => f.truncated);
 
   if (from === WORKTREE_ID || to === WORKTREE_ID) {
-    const untracked = await untrackedFiles(cwd);
-    files = mergeByPath(files, untracked);
+    const untracked = await untrackedFiles(cwd, Math.max(0, MAX_PATCH_BYTES - Buffer.byteLength(text)));
+    files = mergeByPath(files, untracked.files);
+    truncated ||= untracked.truncated;
     if (inverted) files = files.map(invertFile);
   }
 
-  // Bound the payload: cap files and total diff lines (stats stay whole —
-  // they were counted during the full parse; the flag says hunks were cut).
+  // Bound the merged payload too. Truncated files' statistics describe only
+  // the parsed prefix, not an expensive full scan of omitted content.
   if (files.length > MAX_DIFF_FILES) {
     files = files.slice(0, MAX_DIFF_FILES);
     truncated = true;
@@ -278,6 +296,7 @@ export async function diffRecords(cwd: string, from: string, to: string): Promis
   let cut = false;
   for (const f of files) {
     if (cut) {
+      if (f.hunks.length) f.truncated = true;
       f.hunks = [];
       continue;
     }
@@ -286,6 +305,7 @@ export async function diffRecords(cwd: string, from: string, to: string): Promis
       if (lines + h.lines.length > MAX_DIFF_LINES) {
         cut = true;
         truncated = true;
+        f.truncated = true;
         break;
       }
       kept.push(h);
@@ -298,29 +318,52 @@ export async function diffRecords(cwd: string, from: string, to: string): Promis
 }
 
 /** Untracked files as whole-file additions (git diff never reports them). */
-async function untrackedFiles(cwd: string): Promise<DiffFile[]> {
-  const out = await runGit(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], 4 * 1024 * 1024);
-  const rels = out.text.split('\0').filter(Boolean).slice(0, MAX_UNTRACKED_FILES).sort();
+async function untrackedFiles(cwd: string, byteBudget: number): Promise<{ files: DiffFile[]; truncated: boolean }> {
+  // Exclude generated pnpm storage in git itself, before recursive enumeration.
+  // This is a display policy only: tracked files remain visible and no git
+  // configuration or ignore files are changed.
+  const out = await runGit(cwd, ['ls-files', '--others', '--exclude-standard', ...UNTRACKED_EXCLUDES, '-z'], 256 * 1024);
+  const complete = out.truncated ? out.text.slice(0, out.text.lastIndexOf('\0') + 1) : out.text;
+  const all = complete.split('\0').filter(Boolean);
+  const rels = all.slice(0, MAX_UNTRACKED_FILES).sort();
   const files: DiffFile[] = [];
+  let omitted = out.truncated || all.length > MAX_UNTRACKED_FILES;
+  let lineBudget = MAX_DIFF_LINES;
   for (const rel of rels) {
     const abs = path.join(cwd, rel);
     if (!abs.startsWith(path.resolve(cwd) + path.sep)) continue;
     let text: string;
+    let contentCut = false;
     try {
-      const st = await fs.stat(abs);
-      if (!st.isFile() || st.size > MAX_UNTRACKED_BYTES) continue;
-      text = await fs.readFile(abs, 'utf8');
+      const st = await fs.lstat(abs);
+      if (!st.isFile()) { omitted = true; continue; }
+      if (st.size > MAX_UNTRACKED_BYTES || byteBudget <= 0 || lineBudget <= 0) { omitted = true; continue; }
+      // Bounded reads also cover files growing after stat; don't follow links.
+      const handle = await fs.open(abs, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const limit = Math.min(st.size, byteBudget, MAX_UNTRACKED_BYTES);
+        const buffer = Buffer.alloc(limit + 1);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const kept = Math.min(bytesRead, limit);
+        contentCut = bytesRead > kept;
+        omitted ||= contentCut;
+        text = buffer.subarray(0, kept).toString('utf8');
+        byteBudget -= kept;
+      } finally { await handle.close(); }
     } catch {
       continue; // unreadable or non-UTF8 — skip
     }
     if (text.slice(0, 8192).includes('\0')) continue; // binary — skip
-    let lines = text === '' ? [] : text.split('\n');
+    const limit = Math.min(MAX_UNTRACKED_LINES, lineBudget);
+    let lines = text === '' ? [] : text.split('\n', limit + 2);
     if (lines.length && lines[lines.length - 1] === '') lines.pop();
-    let truncated = false;
-    if (lines.length > MAX_UNTRACKED_LINES) {
-      lines = lines.slice(0, MAX_UNTRACKED_LINES);
+    let truncated = contentCut;
+    if (lines.length > limit) {
+      lines = lines.slice(0, limit);
       truncated = true;
     }
+    lineBudget -= lines.length;
+    omitted ||= truncated;
     const diffLines: DiffLine[] = lines.map((l) => ({ t: '+', text: l }));
     files.push({
       path: rel,
@@ -335,7 +378,7 @@ async function untrackedFiles(cwd: string): Promise<DiffFile[]> {
         : [],
     });
   }
-  return files;
+  return { files, truncated: omitted };
 }
 
 /** Merge two file-diff lists by path (untracked entries sort into place). */
@@ -392,8 +435,18 @@ export function parsePatch(patch: string): DiffFile[] {
   const files: DiffFile[] = [];
   let cur: DiffFile | null = null;
   let hunk: DiffHunk | null = null;
-  for (const line of patch.split('\n')) {
+  let lineCount = 0;
+  let offset = 0;
+  // Scan incrementally: splitting a large patch first allocates every line,
+  // defeating payload limits before they can take effect.
+  while (offset < patch.length) {
+    const end = patch.indexOf('\n', offset);
+    const next = end === -1 ? patch.length : end + 1;
+    if (next > MAX_PATCH_BYTES) { if (cur) cur.truncated = true; break; }
+    const line = patch.slice(offset, end === -1 ? patch.length : end);
+    offset = next;
     if (line.startsWith('diff --git ')) {
+      if (files.length >= MAX_DIFF_FILES) { if (cur) cur.truncated = true; break; }
       cur = { path: '', oldPath: null, status: 'modified', binary: false, added: 0, removed: 0, hunks: [] };
       files.push(cur);
       hunk = null;
@@ -437,6 +490,8 @@ export function parsePatch(patch: string): DiffFile[] {
         cur.hunks.push(hunk);
       }
     } else if (hunk && line.length > 0 && (line[0] === '+' || line[0] === '-' || line[0] === ' ')) {
+      if (lineCount >= MAX_DIFF_LINES) { cur.truncated = true; break; }
+      lineCount++;
       const t = line[0] as DiffLine['t'];
       hunk.lines.push({ t, text: line.slice(1) });
       if (t === '+') cur.added++;

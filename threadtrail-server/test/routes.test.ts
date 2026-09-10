@@ -98,6 +98,56 @@ test('diff.json diffs two records selected by the user', async () => {
   assert.equal(body.files[0].added, 1);
 });
 
+test('concurrent diffs coalesce stamping as well as computation', async (t) => {
+  const { handler, cwd } = await setup();
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const head = git(cwd, ['rev-parse', 'HEAD']).trim();
+  const original = fs.readFile;
+  let headReads = 0;
+  t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === path.join(cwd, '.git', 'HEAD')) headReads++;
+    return Reflect.apply(original, fs, args);
+  });
+  const responses = Array.from({ length: 8 }, () => mockRes());
+  await Promise.all(responses.map((res) => handler(mockReq(`/threadtrail/sess-1/diff.json?from=${head}&to=worktree`), res)));
+  assert.equal(headReads, 1);
+  assert.ok(responses.every((res) => res.status === 200));
+  for (const res of responses) assert.deepEqual(res.body(), responses[0].body());
+});
+
+test('live cache expires when nested untracked content changes without a directory stamp change', async (t) => {
+  const { handler, cwd } = await setup();
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const head = git(cwd, ['rev-parse', 'HEAD']).trim();
+  await fs.mkdir(path.join(cwd, 'nested'));
+  await fs.writeFile(path.join(cwd, 'nested/file.txt'), 'before\n');
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const url = `/threadtrail/sess-1/diff.json?from=${head}&to=worktree`;
+  const first = mockRes();
+  await handler(mockReq(url), first);
+  assert.ok(JSON.stringify(first.body()).includes('before'));
+  await fs.writeFile(path.join(cwd, 'nested/file.txt'), 'after!\n');
+  now += 2001;
+  const second = mockRes();
+  await handler(mockReq(url), second);
+  assert.equal(second.status, 200);
+  assert.ok(JSON.stringify(second.body()).includes('after!'));
+});
+
+test('records cache distinguishes different session-relative roots for the same repository', async (t) => {
+  const { cwd } = await setup();
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const { routes, webServer } = makeHarness();
+  registerRoutes(webServer, { sessions: { get: (id) => ({ header: { cwd: id === 'parent' ? path.dirname(cwd) : cwd } }) } });
+  const nested = mockRes();
+  await routes[0].handler(mockReq(`/threadtrail/parent/records.json?root=${path.basename(cwd)}`), nested);
+  const direct = mockRes();
+  await routes[0].handler(mockReq('/threadtrail/direct/records.json'), direct);
+  assert.equal((nested.body() as { root: string }).root, path.basename(cwd));
+  assert.equal((direct.body() as { root: string }).root, '');
+});
+
 test('unknown sessions and bad ids are rejected', async () => {
   const { handler } = await setup();
 

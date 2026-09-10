@@ -3,7 +3,7 @@
  * with syntax-highlighted hunk lines.
  */
 
-import { createElement, Fragment, memo, useCallback, useMemo, useState } from 'react';
+import { createElement, Fragment, memo, useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { detectLang, createHighlighter, renderTokens } from '../highlighter.tsx';
 import { diffStore } from '../store.ts';
@@ -98,9 +98,57 @@ function DiffResultView({ state, diff, sessionId }: { state: DiffState; diff: Di
 /** Memoized: the diff store keeps file objects referentially stable when a
  *  poll returns unchanged content, so an unchanged poll never re-tokenizes a
  *  single line. */
+const INITIAL_LINES = 120;
+const CHUNK_LINES = 400;
+
+function nextIdle(cb: () => void): () => void {
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(cb, { timeout: 200 });
+    return () => cancelIdleCallback(id);
+  }
+  if (typeof requestAnimationFrame === 'function') {
+    const id = requestAnimationFrame(cb);
+    return () => cancelAnimationFrame(id);
+  }
+  const id = setTimeout(cb, 0);
+  return () => clearTimeout(id);
+}
+
+/** Progressive renderer for one file: renders a small first slice, then appends
+ *  chunks in idle frames so the page never freezes while highlighting a huge diff. */
 const FileDiff = memo(function FileDiff({ file, collapsed, onToggleFile }: { file: DiffFile; collapsed: boolean; onToggleFile: (path: string) => void }): ReactElement {
   const lang = detectLang(file.path);
   const hl = useMemo(() => createHighlighter(lang), [lang]);
+  const totalLines = useMemo(() => {
+    let n = 0;
+    for (const h of file.hunks) n += h.lines.length;
+    return n;
+  }, [file.hunks]);
+  const [rendered, setRendered] = useState(0);
+  useEffect(() => {
+    if (collapsed) {
+      setRendered(0);
+      return;
+    }
+    const initial = Math.min(totalLines, INITIAL_LINES);
+    setRendered(initial);
+    if (initial >= totalLines) return;
+    // Track progress in the closure so scheduling stops once the file is
+    // fully rendered — an unconditional re-schedule would idle-loop forever.
+    let current = initial;
+    let cancelled = false;
+    const step = () => {
+      if (cancelled) return;
+      current = Math.min(totalLines, current + CHUNK_LINES);
+      setRendered(current);
+      if (current < totalLines) schedule();
+    };
+    const schedule = () => nextIdle(step);
+    schedule();
+    return () => {
+      cancelled = true;
+    };
+  }, [collapsed, totalLines, file.path]);
   return (
     <div className="ddb-opfile">
       <div
@@ -121,19 +169,38 @@ const FileDiff = memo(function FileDiff({ file, collapsed, onToggleFile }: { fil
       </div>
       {collapsed ? null : file.hunks.length ? (
         <div className="ddb-diff">
-          {file.hunks.map((h, hi) => (
-            <Fragment key={hi}>
-              <div className="ddb-hunk-head">
-                @@ -{h.oldStart},{h.oldLines} +{h.newStart},{h.newLines} @@ {h.header}
-              </div>
-              {h.lines.map((l, li) => (
-                <div key={li} className={`ddb-line ddb-line-${l.t}`}>
-                  <span className="ddb-line-mark">{l.t === ' ' ? ' ' : l.t}</span>
-                  <span className="ddb-line-text">{renderTokens(hl(l.text), `h${hi}-${li}`)}</span>
-                </div>
-              ))}
-            </Fragment>
-          ))}
+          {(() => {
+            let used = 0;
+            const out: ReactElement[] = [];
+            for (let hi = 0; hi < file.hunks.length && used < rendered; hi++) {
+              const h = file.hunks[hi];
+              const remaining = rendered - used;
+              const lines = h.lines.slice(0, remaining);
+              if (!lines.length) break;
+              out.push(
+                <Fragment key={hi}>
+                  <div className="ddb-hunk-head">
+                    @@ -{h.oldStart},{h.oldLines} +{h.newStart},{h.newLines} @@ {h.header}
+                  </div>
+                  {lines.map((l, li) => (
+                    <div key={li} className={`ddb-line ddb-line-${l.t}`}>
+                      <span className="ddb-line-mark">{l.t === ' ' ? ' ' : l.t}</span>
+                      <span className="ddb-line-text">{renderTokens(hl(l.text), `h${hi}-${li}`)}</span>
+                    </div>
+                  ))}
+                </Fragment>,
+              );
+              used += lines.length;
+            }
+            if (used < totalLines) {
+              out.push(
+                <div key="progress" className="ddb-note">
+                  Rendering diff… {used} / {totalLines} lines
+                </div>,
+              );
+            }
+            return out;
+          })()}
         </div>
       ) : file.binary ? (
         <div className="ddb-note">Binary file — no text diff.</div>

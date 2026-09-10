@@ -3,15 +3,15 @@
 A git-diff comparison plugin set for the DeepSeek Harness **web** profile:
 pick any two **records** of a session's workspace — every commit, with the
 uncommitted worktree state treated as one record — and read the
-syntax-highlighted diff between them, live while the agent works. A **pnpm
-TypeScript workspace** with two packages.
+syntax-highlighted diff between them. A **pnpm TypeScript workspace** with two
+packages.
 
 ## Packages
 
 | package | role |
 |---|---|
 | [`threadtrail-server`](threadtrail-server/) | Host plugin (TypeScript → `dist/`): resolves each session's workspace and serves read-only `/threadtrail/...` HTTP routes — `records.json` (the worktree record with changed/untracked counts + up to 300 commits with first-parent links + the empty-tree record) and `diff.json?from=…&to=…` (commit ↔ commit via `git diff`, commit ↔ worktree including untracked files as additions, inverted when the worktree is the "from" side). |
-| [`threadtrail-client`](threadtrail-client/) | Browser plugin (TypeScript/TSX → esbuild bundle `dist/client.js`): a panel in the session-scoped `details` column — a **git-log timeline** (click a record to view it: commit vs its parent, worktree vs HEAD), two-record compare via per-row `F`/`T` chips (with swap/clear), per-file unified diff with **syntax-highlighted** hunks and status badges, an **expandable wide overlay**, a sidebar footer entry that opens the compare view **before any message** (fresh/blank sessions included), and non-disruptive realtime refresh as the agent edits the workspace. |
+| [`threadtrail-client`](threadtrail-client/) | Browser plugin (TypeScript/TSX → esbuild bundle `dist/client.js`): a panel in the session-scoped `details` column — a **git-log timeline** (click a record to view it: commit vs its parent, worktree vs HEAD), two-record compare via per-row `F`/`T` chips (with swap/clear), per-file unified diff with **syntax-highlighted** hunks and status badges, and an **expandable wide overlay**; a sidebar footer entry that opens the compare view **before any message** (fresh/blank sessions included). Loading is entirely manual — no initial fetch, polling, or turn/visibility refresh. |
 
 ## Build & test
 
@@ -40,10 +40,10 @@ pnpm typecheck          # tsc --noEmit in both packages
   is parsed into per-file hunks (renames, binary files, quoted paths) with
   payload caps and a `truncated` flag. Record ids are validated as 40-hex shas
   before they reach the CLI. The plugin never writes to the workspace.
-- **Realtime review**: the panel refetches the records and the open diff on
-  every conversation-window change, so the worktree record (and its diff)
-  tracks the agent's edits as they land. The previous diff stays on screen
-  while a refresh loads.
+- **Manual review**: neither opening a session/panel/overlay nor agent turn
+  edges fetch git records or compute a diff. The panel starts idle; **Load
+  records and diff** / **Refresh** explicitly re-reads the records and the
+  open comparison. Explicit record/root selection computes the selected diff.
 - **Wide overlay**: the details column is capped at 520px by the shell layout,
   so an expand button / sidebar footer entry opens a wide `shell.overlay`
   (up to 78vw) with the record list beside the diff, sharing the same store.
@@ -111,11 +111,14 @@ column (it auto-opens the details column; close it like any panel).
 
 - The plugin needs the `git` binary on the host and a workspace that is a git
   repository; both degrade to an explicit empty state in the panel.
-- The worktree record is the *live* working tree: it changes as files are
-  edited, so a pinned `HEAD → worktree` diff is a realtime review of pending
-  changes. Untracked files appear as whole-file additions (capped per file).
-- Very large diffs are truncated host-side (24 MB patch / 500 files / 20 000
-  lines) and flagged in the UI.
+- The worktree record is a *snapshot* of the working tree taken when loaded;
+  click Refresh after files change to see the current `HEAD → worktree` diff.
+  Untracked files appear as whole-file additions (capped per file). Generated
+  `.pnpm-home/` storage is excluded from untracked enumeration, while tracked
+  cache paths remain visible.
+- Diffs are bounded host-side before parsing (1 MiB combined patch/untracked
+  content / 500 files / 20 000 lines, with a 5 s git timeout) and flagged in
+  the UI.
 - The panel occupies the `details` column at `priority: -1`, shadowing
   ui-conversation's built-in tool-inspector panel (single slot, lowest priority
   wins). Restore coexistence by moving the ThreadTrail panel to a different
